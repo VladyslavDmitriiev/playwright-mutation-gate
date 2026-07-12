@@ -1,0 +1,28 @@
+{
+  "name": "playwright-mutation-gate",
+  "version": "0.0.1",
+  "description": "Mutation testing for Playwright assertions: invert each test's primary assertion and fail the run if the test stays green. Name reservation — v0.1.0 in development.",
+  "keywords": [
+    "playwright",
+    "mutation-testing",
+    "e2e",
+    "testing",
+    "test-quality",
+    "assertions",
+    "hollow-tests",
+    "ci",
+    "qa"
+  ],
+  "license": "MIT",
+  "author": "Vladyslav Dmitriiev <vladyslav.dmitriiev@pm.me>",
+  "main": "index.js",
+  "bin": {
+    "playwright-mutation-gate": "index.js"
+  },
+  "files": [
+    "index.js"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}
