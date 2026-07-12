@@ -21,8 +21,8 @@ The gate then inverts that assertion (`expect(x).toBeVisible()` → `expect(x).n
 in a temporary copy of the spec and re-runs the test:
 
 - test fails → the assertion is alive (**killed** mutation, good)
-- test still passes → the assertion checks nothing (**survived**, a hollow test) — the gate
-  exits 1 and fails your CI run
+- test still passes → the assertion checks nothing (**survived**, a hollow test), so the
+  gate exits 1 and fails your CI run
 
 Tests without a `@primary-assert` marker also fail the gate by default, so nothing slips
 through unmarked.
@@ -30,7 +30,7 @@ through unmarked.
 ## Why
 
 Stryker and friends mutate your application code to score unit tests. E2E suites have the
-opposite blind spot: the assertion itself is often hollow — it passes against a broken app.
+opposite blind spot: the assertion itself is often hollow. It passes against a broken app.
 This tool mutates the assertions, not the app.
 
 v0.1.0 coming soon.
