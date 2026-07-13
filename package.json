@@ -15,14 +15,31 @@
   ],
   "license": "MIT",
   "author": "Vladyslav Dmitriiev <vladyslav.dmitriiev@pm.me>",
-  "main": "index.js",
+  "type": "module",
   "bin": {
-    "playwright-mutation-gate": "index.js"
+    "playwright-mutation-gate": "dist/cli.js"
   },
   "files": [
-    "index.js"
+    "dist"
   ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test:unit": "vitest run",
+    "test:e2e": "playwright test",
+    "test": "npm run lint && npm run typecheck && npm run build && npm run test:unit && npm run test:e2e"
+  },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.61.1",
+    "@types/node": "^26.1.1",
+    "eslint": "^10.7.0",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.63.0",
+    "vitest": "^4.1.10"
   }
 }
