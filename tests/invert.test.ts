@@ -9,9 +9,12 @@ import { invertAssertLine } from '../src/invert.js';
  *   argument may not. Multi-line chains report cannot-mutate.
  * - String-based, no AST: assertions wrapped in helper functions or an
  *   aliased/re-exported `expect` are not recognized.
- * - Over-strict on the word "expect": a second `expect` call shape on the
- *   marked line (even inside a string literal like 'expect (x)') reports
- *   cannot-mutate instead of guessing which call to mutate.
+ * - Over-strict on the word "expect": a second `expect` call in CODE on the
+ *   marked line reports cannot-mutate instead of guessing which call to
+ *   mutate. This includes asymmetric matchers (expect.objectContaining,
+ *   expect.any) in matcher arguments and nested expects inside toPass, by
+ *   design: one primary assertion per line. `expect` inside string literals,
+ *   comments and regex literals is ignored (shared lexer).
  * - Custom matchers must follow the `toXxx` naming convention to be
  *   recognized as matchers, and must not shadow built-in method names
  *   (toString, toFixed, toSorted, ...) which are denylisted.
@@ -70,6 +73,21 @@ describe('invertAssertLine: adds .not', () => {
       name: 'parens and quotes inside string argument',
       input: "await expect(page.getByText('a (b)')).toBeVisible();",
       expected: "await expect(page.getByText('a (b)')).not.toBeVisible();",
+    },
+    {
+      name: 'regex literal argument with quote and paren inside',
+      input: "await expect(page.getByText(/Don't have an account( yet)?/)).toBeVisible();",
+      expected: "await expect(page.getByText(/Don't have an account( yet)?/)).not.toBeVisible();",
+    },
+    {
+      name: 'block comment with paren and matcher text inside the argument',
+      input: 'expect(a /* old: ).toBe(1) */).toEqual(2);',
+      expected: 'expect(a /* old: ).toBe(1) */).not.toEqual(2);',
+    },
+    {
+      name: 'trailing line comment mentioning expect is ignored',
+      input: 'expect(sum).toBe(3); // expect(sum).toBe(4)',
+      expected: 'expect(sum).not.toBe(3); // expect(sum).toBe(4)',
     },
     {
       name: 'template literal with expression in expect argument',
