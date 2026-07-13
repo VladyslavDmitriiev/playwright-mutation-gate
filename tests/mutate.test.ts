@@ -4,9 +4,24 @@ import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 
 import { mutationFilePath, planSpecMutations, writeMutationFile } from '../src/mutate.js';
+import type { Mutation, SpecPlan } from '../src/mutate.js';
 
 const fixture = (name: string): string =>
   readFileSync(new URL(`../fixtures/${name}`, import.meta.url), 'utf8');
+
+// Hard-failing narrowers, mirroring ok/cannot in invert.test.ts: a mutation of
+// the wrong variant fails immediately instead of silently skipping assertions.
+const okMutation = (plan: SpecPlan, i = 0): Extract<Mutation, { mutatedSource: string }> => {
+  const m = plan.mutations[i];
+  expect(m, `expected ok mutation, got ${JSON.stringify(m)}`).toHaveProperty('mutatedSource');
+  return m as Extract<Mutation, { mutatedSource: string }>;
+};
+
+const cannotMutation = (plan: SpecPlan, i = 0): Extract<Mutation, { cannotMutate: string }> => {
+  const m = plan.mutations[i];
+  expect(m, `expected cannot-mutate, got ${JSON.stringify(m)}`).toHaveProperty('cannotMutate');
+  return m as Extract<Mutation, { cannotMutate: string }>;
+};
 
 const changedLines = (before: string, after: string): number[] => {
   const a = before.split('\n');
@@ -21,11 +36,11 @@ describe('planSpecMutations: reference fixtures', () => {
     const plan = planSpecMutations(source);
     expect(plan.unmarkedTests).toEqual([]);
     expect(plan.strayMarkerLines).toEqual([]);
+    expect(plan.malformedMarkerLines).toEqual([]);
     expect(plan.mutations).toHaveLength(1);
-    const m = plan.mutations[0]!;
+    const m = okMutation(plan);
     expect(m.testTitle).toBe('shows an error for an invalid email');
-    expect(m).toHaveProperty('mutatedSource');
-    if (!('mutatedSource' in m)) return;
+    expect(m.testLine).toBe(5);
     expect(m.markerLine).toBe(9);
     expect(m.assertLine).toBe(10);
     expect(changedLines(source, m.mutatedSource)).toEqual([10]);
@@ -36,9 +51,7 @@ describe('planSpecMutations: reference fixtures', () => {
     const source = fixture('hollow.spec.ts');
     const plan = planSpecMutations(source);
     expect(plan.mutations).toHaveLength(1);
-    const m = plan.mutations[0]!;
-    expect(m).toHaveProperty('mutatedSource');
-    if (!('mutatedSource' in m)) return;
+    const m = okMutation(plan);
     expect(m.assertLine).toBe(11);
     expect(changedLines(source, m.mutatedSource)).toEqual([11]);
     expect(m.mutatedSource.split('\n')[10]).toContain('.not.toBeVisible()');
@@ -59,15 +72,16 @@ describe('planSpecMutations: markers and test blocks', () => {
     expect(plan.unmarkedTests).toEqual([{ title: 'no marker here', line: 2 }]);
   });
 
-  it('exempts test.skip and test.fixme from sentinel accounting, not test.only', () => {
+  it('exempts unmarked test.skip/fixme/fail from sentinel accounting, not test.only', () => {
     const plan = planSpecMutations(
       [
         "test.skip('parked', async () => {});",
         "test.fixme('broken', async () => {});",
+        "test.fail('expected to fail', async () => {});",
         "test.only('focused', async () => {});",
       ].join('\n'),
     );
-    expect(plan.unmarkedTests).toEqual([{ title: 'focused', line: 3 }]);
+    expect(plan.unmarkedTests).toEqual([{ title: 'focused', line: 4 }]);
   });
 
   it('mutates a marked test.only block', () => {
@@ -80,7 +94,39 @@ describe('planSpecMutations: markers and test blocks', () => {
       ].join('\n'),
     );
     expect(plan.mutations).toHaveLength(1);
-    expect(plan.mutations[0]).toHaveProperty('mutatedSource');
+    okMutation(plan);
+  });
+
+  it('reports a marker inside test.skip/fixme/fail as cannot-mutate, never a verdictable mutation', () => {
+    const spec = (decl: string) =>
+      [
+        `${decl}('t', async () => {`,
+        '  // @primary-assert',
+        '  await expect(x).toBe(1);',
+        '});',
+      ].join('\n');
+    expect(cannotMutation(planSpecMutations(spec('test.skip'))).cannotMutate).toContain(
+      'never runs',
+    );
+    expect(cannotMutation(planSpecMutations(spec('test.fixme'))).cannotMutate).toContain(
+      'never runs',
+    );
+    expect(cannotMutation(planSpecMutations(spec('test.fail'))).cannotMutate).toContain(
+      'expects failure',
+    );
+  });
+
+  it('recognizes the test.fail declaration form as a block (marker is not stray)', () => {
+    const plan = planSpecMutations(
+      [
+        "test.fail('renders error page', async () => {",
+        '  // @primary-assert',
+        '  await expect(x).toBe(1);',
+        '});',
+      ].join('\n'),
+    );
+    expect(plan.strayMarkerLines).toEqual([]);
+    expect(cannotMutation(plan).testTitle).toBe('renders error page');
   });
 
   it('reports two markers in one test as cannot-mutate', () => {
@@ -95,10 +141,9 @@ describe('planSpecMutations: markers and test blocks', () => {
       ].join('\n'),
     );
     expect(plan.mutations).toHaveLength(1);
-    const m = plan.mutations[0]!;
+    const m = cannotMutation(plan);
     expect(m.markerLine).toBe(2);
-    expect(m).toHaveProperty('cannotMutate');
-    if ('cannotMutate' in m) expect(m.cannotMutate).toContain('2 @primary-assert markers');
+    expect(m.cannotMutate).toContain('2 @primary-assert markers');
   });
 
   it('reports a marker outside any test block as stray', () => {
@@ -115,19 +160,19 @@ describe('planSpecMutations: markers and test blocks', () => {
     expect(plan.mutations).toHaveLength(1);
   });
 
-  it('skips blank lines between the marker and the assertion', () => {
-    const plan = planSpecMutations(
-      [
-        "test('gap', async ({ page }) => {",
-        '  // @primary-assert',
-        '',
-        '  await expect(page.locator("#a")).toBeVisible();',
-        '});',
-      ].join('\n'),
-    );
-    const m = plan.mutations[0]!;
-    expect(m).toHaveProperty('mutatedSource');
-    expect(m.assertLine).toBe(4);
+  it('skips blank and comment-only lines between the marker and the assertion', () => {
+    const source = [
+      "test('gap', async ({ page }) => {",
+      '  // @primary-assert',
+      '',
+      '  // expect(status).toBe(200) -- leftover comment, must not be mutated',
+      '  await expect(page.locator("#a")).toBeVisible();',
+      '});',
+    ].join('\n');
+    const plan = planSpecMutations(source);
+    const m = okMutation(plan);
+    expect(m.assertLine).toBe(5);
+    expect(changedLines(source, m.mutatedSource)).toEqual([5]);
   });
 
   it('reports a marker with nothing after it as cannot-mutate', () => {
@@ -136,9 +181,7 @@ describe('planSpecMutations: markers and test blocks', () => {
     const inTest = planSpecMutations(
       ["test('tail', async () => {", '  // @primary-assert'].join('\n'),
     );
-    const m = inTest.mutations[0]!;
-    expect(m).toHaveProperty('cannotMutate');
-    if ('cannotMutate' in m) expect(m.cannotMutate).toContain('no code line follows');
+    expect(cannotMutation(inTest).cannotMutate).toContain('no code line follows');
   });
 
   it('propagates cannot-mutate from the inverter with the assert line', () => {
@@ -150,10 +193,9 @@ describe('planSpecMutations: markers and test blocks', () => {
         '});',
       ].join('\n'),
     );
-    const m = plan.mutations[0]!;
+    const m = cannotMutation(plan);
     expect(m.assertLine).toBe(3);
-    expect(m).toHaveProperty('cannotMutate');
-    if ('cannotMutate' in m) expect(m.cannotMutate).toContain('no expect()');
+    expect(m.cannotMutate).toContain('no expect()');
   });
 
   it('mutates only the marked test when several tests share a file', () => {
@@ -168,9 +210,10 @@ describe('planSpecMutations: markers and test blocks', () => {
     ].join('\n');
     const plan = planSpecMutations(source);
     expect(plan.unmarkedTests).toEqual([{ title: 'first', line: 1 }]);
-    const m = plan.mutations[0]!;
+    const m = okMutation(plan);
     expect(m.testTitle).toBe('second');
-    if ('mutatedSource' in m) expect(changedLines(source, m.mutatedSource)).toEqual([6]);
+    expect(m.testLine).toBe(4);
+    expect(changedLines(source, m.mutatedSource)).toEqual([6]);
   });
 
   it('ignores test( inside strings, comments and member calls', () => {
@@ -199,17 +242,111 @@ describe('planSpecMutations: markers and test blocks', () => {
     expect(plan.mutations[0]!.testTitle).toBe('closes a paren ) in the title');
   });
 
-  it('falls back to a placeholder for dynamic titles', () => {
+  it('falls back to a placeholder for dynamic and interpolated titles', () => {
     const plan = planSpecMutations(
       [
-        'test(`template ${kind}`, async () => {});',
-        'test(titleVar, async ({ page }) => {',
+        'test(`login as ${role}`, async ({ page }) => {',
         '  // @primary-assert',
         '  await expect(page.locator("#a")).toBeVisible();',
         '});',
+        'test(titleVar, async ({ page }) => {',
+        '  // @primary-assert',
+        '  await expect(page.locator("#b")).toBeVisible();',
+        '});',
+        'test(`plain backtick title`, async ({ page }) => {',
+        '  // @primary-assert',
+        '  await expect(page.locator("#c")).toBeVisible();',
+        '});',
       ].join('\n'),
     );
-    expect(plan.mutations[0]!.testTitle).toBe('(dynamic title)');
+    expect(plan.mutations.map((m) => m.testTitle)).toEqual([
+      '(dynamic title)',
+      '(dynamic title)',
+      'plain backtick title',
+    ]);
+  });
+});
+
+describe('planSpecMutations: regex literals do not corrupt the scan', () => {
+  it('survives a backtick inside a regex literal before a marked test', () => {
+    const source = [
+      'const parts = s.split(/`/);',
+      "test('later', async ({ page }) => {",
+      '  // @primary-assert',
+      "  await expect(page.locator('#a')).toBeVisible();",
+      '});',
+    ].join('\n');
+    const plan = planSpecMutations(source);
+    expect(plan.strayMarkerLines).toEqual([]);
+    const m = okMutation(plan);
+    expect(m.testTitle).toBe('later');
+    expect(changedLines(source, m.mutatedSource)).toEqual([4]);
+  });
+
+  it('keeps block boundaries intact across a quote inside a regex literal', () => {
+    const plan = planSpecMutations(
+      [
+        "test('first', async ({ page }) => {",
+        "  await expect(page.getByText(/don't panic/)).toBeVisible();",
+        '});',
+        "test('second', async ({ page }) => {",
+        '  // @primary-assert',
+        "  await expect(page.locator('#b')).toBeVisible();",
+        '});',
+      ].join('\n'),
+    );
+    expect(plan.unmarkedTests).toEqual([{ title: 'first', line: 1 }]);
+    expect(okMutation(plan).testTitle).toBe('second');
+  });
+
+  it('does not count an escaped paren inside a regex literal', () => {
+    const plan = planSpecMutations(
+      [
+        "test('t', async ({ page }) => {",
+        "  const clean = s.replace(/\\)/g, '');",
+        '  // @primary-assert',
+        "  await expect(page.locator('#a')).toBeVisible();",
+        '});',
+      ].join('\n'),
+    );
+    expect(plan.strayMarkerLines).toEqual([]);
+    expect(okMutation(plan).assertLine).toBe(4);
+  });
+});
+
+describe('planSpecMutations: marker hygiene', () => {
+  it('ignores marker text inside a block comment but reports it as malformed', () => {
+    const plan = planSpecMutations(
+      [
+        "test('healthy', async ({ page }) => {",
+        '  /*',
+        '  // @primary-assert',
+        '  await expect(old).toBe(1);',
+        '  */',
+        '  // @primary-assert',
+        "  await expect(page.locator('#a')).toBeVisible();",
+        '});',
+      ].join('\n'),
+    );
+    expect(plan.malformedMarkerLines).toEqual([3]);
+    expect(okMutation(plan).assertLine).toBe(7);
+  });
+
+  it('reports near-miss markers as malformed instead of silently ignoring them', () => {
+    const plan = planSpecMutations(
+      [
+        "test('t', async ({ page }) => {",
+        '  // @primary-assert: login error',
+        "  await expect(page.locator('#a')).toBeVisible();",
+        '});',
+        "test('u', async ({ page }) => {",
+        "  await expect(page.locator('#b')).toBeVisible(); // @primary-assert",
+        '});',
+      ].join('\n'),
+    );
+    expect(plan.malformedMarkerLines).toEqual([2, 6]);
+    expect(plan.mutations).toEqual([]);
+    expect(plan.unmarkedTests.map((t) => t.title)).toEqual(['t', 'u']);
   });
 });
 
@@ -217,18 +354,25 @@ describe('mutation files', () => {
   it.each([
     { spec: 'fixtures/hollow.spec.ts', index: 1, path: 'fixtures/hollow.pmg-mutation-1.spec.ts' },
     { spec: 'checkout.test.mjs', index: 2, path: 'checkout.pmg-mutation-2.test.mjs' },
+    { spec: 'checkout.e2e.ts', index: 0, path: 'checkout.pmg-mutation-0.e2e.ts' },
     { spec: 'plain.ts', index: 1, path: 'plain.pmg-mutation-1.ts' },
     { spec: 'no-extension', index: 1, path: 'no-extension.pmg-mutation-1' },
-  ])('names the copy $path', ({ spec, index, path }) => {
+  ])('names the copy $path preserving the whole original tail', ({ spec, index, path }) => {
     expect(mutationFilePath(spec, index)).toBe(path);
+  });
+
+  it('appends the tag to the mutation segment', () => {
+    expect(mutationFilePath('a.spec.ts', 3, 'zz')).toBe('a.pmg-mutation-3-zz.spec.ts');
   });
 
   const dir = mkdtempSync(join(tmpdir(), 'pmg-'));
   afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
-  it('writes the mutated copy next to the spec and returns its path', () => {
+  it('writes the mutated copy next to the spec with a process-unique name', () => {
     const written = writeMutationFile(join(dir, 'sample.spec.ts'), 1, 'mutated content\n');
-    expect(written).toBe(join(dir, 'sample.pmg-mutation-1.spec.ts'));
+    expect(written).toBe(
+      join(dir, `sample.pmg-mutation-1-${process.pid.toString(36)}.spec.ts`),
+    );
     expect(readFileSync(written, 'utf8')).toBe('mutated content\n');
   });
 });
