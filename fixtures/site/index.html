@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Signup fixture</title>
+</head>
+<body>
+  <h1>Newsletter signup</h1>
+  <form id="signup" novalidate>
+    <label for="email">Email</label>
+    <input id="email" name="email" type="email" />
+    <button id="submit" type="submit">Subscribe</button>
+  </form>
+  <p id="error" hidden>Please enter a valid email address.</p>
+  <p id="success" hidden>Subscribed. Check your inbox.</p>
+  <script>
+    const form = document.getElementById('signup');
+    const email = document.getElementById('email');
+    const error = document.getElementById('error');
+    const success = document.getElementById('success');
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      const valid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.value);
+      error.hidden = valid;
+      success.hidden = !valid;
+    });
+  </script>
+</body>
+</html>
