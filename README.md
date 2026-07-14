@@ -14,6 +14,20 @@ fails your CI run instead of reporting a lie.
   <img src="media/demo.svg" alt="Terminal recording: 3 killed, 1 survived, gate fails" width="840">
 </p>
 
+<details><summary>Text version (if the SVG above does not render)</summary>
+
+```
+fixtures/demo.spec.ts
+  killed         shows error for invalid email  :8
+  killed         hides error for valid email    :16
+  killed         shows success for valid email  :24
+  survived       hides success initially        :31
+
+3 killed, 1 survived, 0 cannot-mutate, 0 errors
+Gate FAILED: hollow, unverified or broken assertions above.
+```
+</details>
+
 ## Quick start
 
 Requires **Node >= 20** and a working **Playwright** setup (any version that
