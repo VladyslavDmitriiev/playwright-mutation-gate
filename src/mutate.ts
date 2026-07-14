@@ -34,6 +34,11 @@ export interface SpecPlan {
   unmarkedTests: { title: string; line: number }[];
   /** 1-based lines of valid markers that sit outside every test() block. */
   strayMarkerLines: number[];
+  /**
+   * 1-based lines of test.only() declarations. Any .only filters out every
+   * other test in the file, so the runner refuses the whole spec.
+   */
+  onlyTestLines: number[];
   /** 1-based lines mentioning @primary-assert that do not form a valid marker. */
   malformedMarkerLines: number[];
 }
@@ -147,8 +152,10 @@ export function planSpecMutations(source: string): SpecPlan {
 
   const mutations: Mutation[] = [];
   const unmarkedTests: SpecPlan['unmarkedTests'] = [];
+  const onlyTestLines: number[] = [];
   for (const block of blocks) {
     const testLine = lineOf(block.anchor);
+    if (block.mode === 'only') onlyTestLines.push(testLine);
     if (block.markers.length === 0) {
       if (!UNGATEABLE_MODES.has(block.mode)) {
         unmarkedTests.push({ title: block.title, line: testLine });
@@ -190,7 +197,7 @@ export function planSpecMutations(source: string): SpecPlan {
     mutations.push({ ...base, assertLine: target + 1, mutatedSource: mutatedLines.join('\n') });
   }
 
-  return { mutations, unmarkedTests, strayMarkerLines, malformedMarkerLines };
+  return { mutations, unmarkedTests, strayMarkerLines, malformedMarkerLines, onlyTestLines };
 }
 
 /**

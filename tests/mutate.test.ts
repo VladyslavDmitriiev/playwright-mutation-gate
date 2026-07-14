@@ -82,6 +82,18 @@ describe('planSpecMutations: markers and test blocks', () => {
       ].join('\n'),
     );
     expect(plan.unmarkedTests).toEqual([{ title: 'focused', line: 4 }]);
+    expect(plan.onlyTestLines).toEqual([4]);
+  });
+
+  it('reports test.only declaration lines so the runner can refuse the spec', () => {
+    const plan = planSpecMutations(
+      [
+        "test('plain', async () => {});",
+        "test.only('focused', async () => {});",
+        "test . only('spaced', async () => {});",
+      ].join('\n'),
+    );
+    expect(plan.onlyTestLines).toEqual([2, 3]);
   });
 
   it('mutates a marked test.only block', () => {
