@@ -1,5 +1,9 @@
 # playwright-mutation-gate
 
+[![npm version](https://img.shields.io/npm/v/playwright-mutation-gate)](https://www.npmjs.com/package/playwright-mutation-gate)
+[![CI](https://github.com/VladyslavDmitriiev/playwright-mutation-gate/actions/workflows/ci.yml/badge.svg)](https://github.com/VladyslavDmitriiev/playwright-mutation-gate/actions)
+[![license](https://img.shields.io/npm/l/playwright-mutation-gate)](./LICENSE)
+
 > A passing test only means something if it can fail.
 
 `playwright-mutation-gate` inverts the assertion you marked as primary and
@@ -10,24 +14,18 @@ fails your CI run instead of reporting a lie.
   <img src="media/demo.svg" alt="Terminal recording: 3 killed, 1 survived, gate fails" width="840">
 </p>
 
-```
-fixtures/honest.spec.ts
-  killed         shows an error for an invalid email  :10
-
-fixtures/hollow.spec.ts
-  survived       shows an error for an invalid email  :11
-
-1 killed, 1 survived, 0 cannot-mutate, 0 errors
-Gate FAILED: hollow, unverified or broken assertions above.
-```
-
 ## Quick start
+
+Requires **Node >= 20** and a working **Playwright** setup (any version that
+supports `playwright test`).
 
 ```bash
 npm install -D playwright-mutation-gate
 ```
 
-Mark the primary assertion in each test with `// @primary-assert`:
+Mark the primary assertion in each test with `// @primary-assert`.
+The marker goes on its own line, right above the assertion. The assertion
+itself must be a single-line `expect(...)` call.
 
 ```ts
 test('checkout shows confirmation', async ({ page }) => {
@@ -45,19 +43,27 @@ npx playwright-mutation-gate "tests/**/*.spec.ts"
 
 ## How marking works
 
-Add `// @primary-assert` on the line immediately above the assertion you
-consider the single most important check in the test. The gate inverts that
-assertion (`expect(x).toBeVisible()` becomes `expect(x).not.toBeVisible()`)
-in a temporary copy of the spec and re-runs the test in isolation.
+The gate inverts the marked assertion
+(`expect(x).toBeVisible()` becomes `expect(x).not.toBeVisible()`) in a
+temporary copy of the spec and re-runs the test in isolation.
 
 - **killed** -- the test failed under inversion. The assertion is alive.
 - **survived** -- the test still passed. The assertion checks nothing useful.
 - **cannot-mutate** -- the assertion shape could not be inverted safely. The
   gate reports it instead of guessing.
 
-One marker per `test()` block. Tests without a marker fail the gate by
-default (sentinel mode), so nothing slips through unmarked. Disable with
-`--no-require-sentinel` while you're marking an existing suite.
+One marker per `test()` block. Markers inside `test.describe` or `test.use`
+callbacks work the same way -- the gate scans each `test()` individually,
+nesting does not matter.
+
+By default, tests without a marker fail the gate (sentinel mode). This means
+a newly added test without `// @primary-assert` shows up as:
+
+```
+  unmarked       adds item to cart  :42
+```
+
+Pass `--no-require-sentinel` to opt out while you're marking an existing suite.
 
 ## CI recipe
 
@@ -97,26 +103,24 @@ Options:
   -h, --help                display help for command
 ```
 
+The package is CLI-only for now. Programmatic API is planned for v0.2.
+
 ## Limitations
 
 String-based inversion, not AST. This keeps the tool small and dependency-free
-but means some assertion shapes report `cannot-mutate` instead of inverting:
+but means some shapes report `cannot-mutate`:
 
 - **Single line only.** `expect(...)` and its matcher must start on the marked
-  line. Matcher arguments may continue on following lines, but the expect call
-  itself may not. Multi-line chains report cannot-mutate.
-- **One assertion per line.** A second `expect` call in code on the marked line
-  reports cannot-mutate rather than guessing which one to invert. This includes
-  asymmetric matchers (`expect.objectContaining`) in arguments and nested
-  expects inside `toPass`.
-- **No aliases.** Assertions wrapped in helper functions or using a
-  re-exported/aliased `expect` are not recognized.
-- **Custom matchers** must follow the `toXxx` naming convention. Built-in
-  method names (`toString`, `toFixed`, `toSorted`, ...) are denylisted to avoid
-  false matches.
-- **Supported chain shape:**
+  line. Multi-line chains report cannot-mutate.
+- **One assertion per line.** Two `expect` calls on the same line (including
+  asymmetric matchers in arguments, nested expects inside `toPass`) report
+  cannot-mutate.
+- **No aliases.** Assertions using a re-exported or aliased `expect` are not
+  recognized.
+- **Custom matchers** must follow the `toXxx` convention. Names that shadow
+  built-ins (`toString`, `toFixed`, ...) are denylisted.
+- **Supported chain:**
   `[await] expect[.soft|.poll](...)[.resolves|.rejects][.not].toXxx(`
-  Anything outside this shape (e.g. `expect.extend`) reports cannot-mutate.
 
 `cannot-mutate` is always safe: the gate tells you it could not verify the
 assertion, never silently skips it.
@@ -135,6 +139,11 @@ assertions, not the app.
 
 If a green test cannot turn red when its assertion is inverted, it was never
 testing anything. The gate catches that before it reaches production.
+
+## Contributing
+
+Issues and PRs are welcome. Run `npm test` before submitting -- it covers
+lint, typecheck, unit, e2e and integration tests in one pass.
 
 ## License
 
