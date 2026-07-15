@@ -152,6 +152,15 @@ The package is CLI-only for now. Programmatic API is planned for v0.2.
 
 ## Limitations
 
+**The gate proves an assertion can fail, not that it checks the right thing.**
+A weak but falsifiable assertion passes: a test that asserts a site-wide header
+(one that also renders on the error page) is killed by inversion and clears the
+gate, even though it would not catch the feature breaking. What the gate
+guarantees is narrower and mechanical: every marked assertion actually runs and
+is load-bearing, so the test cannot stay green regardless of what the app does.
+Judging whether the assertion is the *right* one still takes review, or
+application-code mutation testing (Stryker-style), which is a different tool.
+
 String-based inversion, not AST. This keeps the tool small and dependency-free
 but means some shapes report `cannot-mutate`:
 
@@ -173,9 +182,10 @@ assertion, never silently skips it.
 ## Why
 
 AI code generators write tests fast. The tests look right: good names, proper
-selectors, green checkmarks. But the assertions are often hollow. They check
-conditions that are always true, guard assertions behind branches that never
-execute, or assert against selectors that do not exist on the page.
+selectors, green checkmarks. But the assertions are often hollow: a forgotten
+`await` whose result nobody checks, an assertion guarded behind a branch that
+never executes, a `not.toBeVisible` against a selector that never existed, a
+test silently disabled with `skip`.
 
 Stryker and friends mutate your *application code* to score unit tests. E2E
 suites have the opposite blind spot: the *assertion itself* is often the weak
