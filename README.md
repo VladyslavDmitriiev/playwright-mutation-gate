@@ -134,6 +134,24 @@ jobs:
 The gate exits 0 only when every marked assertion is killed and sentinel
 mode is satisfied. Any other outcome exits 1.
 
+Cost scales linearly: every marked assertion is one extra `playwright test`
+run. That is fine for a handful of specs, but on a large suite you probably
+do not want the full sweep on every push. Two patterns that work well:
+
+- **Gate only what changed.** The CLI takes plain file paths, so feed it the
+  spec files the PR touched:
+
+  ```yaml
+      - run: |
+          SPECS=$(git diff --name-only origin/${{ github.base_ref }}... -- 'tests/**/*.spec.ts')
+          [ -n "$SPECS" ] && npx playwright-mutation-gate $SPECS || echo "no specs changed"
+  ```
+
+- **Full sweep on a schedule.** Run the whole glob nightly instead of per
+  commit. A hollow assertion does not get less hollow between merges;
+  catching it a day later is fine. `--playwright-args` is available if you
+  need to shard or point at a specific config.
+
 ## CLI reference
 
 ```
@@ -161,6 +179,14 @@ is load-bearing, so the test cannot stay green regardless of what the app does.
 Judging whether the assertion is the *right* one still takes review, or
 application-code mutation testing (Stryker-style), which is a different tool.
 
+**A kill is slightly generous by construction.** `killed` means the mutated
+run failed, not that the flipped assertion is what failed. Playwright actions
+carry implicit assertions (`click()` fails on its own if the element never
+appears), and an ordinarily flaky step also counts, so a test can die before
+it ever reaches the inverted line. The asymmetry works in your favor:
+`survived` has no such excuse. A test that stays green with its own primary
+assertion inverted is hollow, full stop.
+
 String-based inversion, not AST. This keeps the tool small and dependency-free
 but means some shapes report `cannot-mutate`:
 
@@ -178,6 +204,15 @@ but means some shapes report `cannot-mutate`:
 
 `cannot-mutate` is always safe: the gate tells you it could not verify the
 assertion, never silently skips it.
+
+Skipped tests get the same honesty. A test disabled with `test.skip` never
+executes, so there is nothing to observe when its assertion is inverted.
+Rather than guess, the gate reports `cannot-mutate` with the reason ("the
+test was skipped at runtime (conditional test.skip), so the inverted
+assertion never ran"). In
+practice this is a feature: a `test.skip(true, ...)` from months ago looks
+identical to a healthy passing spec in normal CI output, and the gate is
+often what surfaces it.
 
 ## Why
 
