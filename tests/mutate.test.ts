@@ -351,14 +351,78 @@ describe('planSpecMutations: marker hygiene', () => {
         '  // @primary-assert: login error',
         "  await expect(page.locator('#a')).toBeVisible();",
         '});',
-        "test('u', async ({ page }) => {",
-        "  await expect(page.locator('#b')).toBeVisible(); // @primary-assert",
+      ].join('\n'),
+    );
+    expect(plan.malformedMarkerLines).toEqual([2]);
+    expect(plan.mutations).toEqual([]);
+    expect(plan.unmarkedTests.map((t) => t.title)).toEqual(['t']);
+  });
+});
+
+describe('planSpecMutations: trailing markers', () => {
+  it('mutates the assertion when the marker trails it on the same line', () => {
+    const source = [
+      "test('t', async ({ page }) => {",
+      "  await expect(page.locator('#a')).toBeVisible(); // @primary-assert",
+      '});',
+    ].join('\n');
+    const plan = planSpecMutations(source);
+    const m = okMutation(plan);
+    expect(m.markerLine).toBe(2);
+    expect(m.assertLine).toBe(2);
+    expect(plan.malformedMarkerLines).toEqual([]);
+    expect(plan.unmarkedTests).toEqual([]);
+    // The inverted matcher lands on the marker's own line; the marker survives.
+    expect(changedLines(source, m.mutatedSource)).toEqual([2]);
+    expect(m.mutatedSource.split('\n')[1]).toBe(
+      "  await expect(page.locator('#a')).not.toBeVisible(); // @primary-assert",
+    );
+  });
+
+  it('inverts a negated assertion carrying a trailing marker', () => {
+    const plan = planSpecMutations(
+      [
+        "test('t', async ({ page }) => {",
+        '  await expect(page).not.toHaveURL(/\\/search\\//); // @primary-assert',
         '});',
       ].join('\n'),
     );
-    expect(plan.malformedMarkerLines).toEqual([2, 6]);
-    expect(plan.mutations).toEqual([]);
-    expect(plan.unmarkedTests.map((t) => t.title)).toEqual(['t', 'u']);
+    const m = okMutation(plan);
+    expect(m.assertLine).toBe(2);
+    expect(m.mutatedSource.split('\n')[1]).toBe(
+      '  await expect(page).toHaveURL(/\\/search\\//); // @primary-assert',
+    );
+  });
+
+  it('handles soft assertions with a trailing marker', () => {
+    const plan = planSpecMutations(
+      [
+        "test('t', async ({ page }) => {",
+        '  await expect.soft(page.locator("#a")).toHaveText("x"); // @primary-assert',
+        '});',
+      ].join('\n'),
+    );
+    const m = okMutation(plan);
+    expect(m.assertLine).toBe(2);
+    expect(m.mutatedSource.split('\n')[1]).toContain('.not.toHaveText');
+  });
+
+  it('cannot mutate a trailing marker on a continuation line (no expect there)', () => {
+    // The natural but unmutatable case: marker trails the closing paren of a
+    // multi-line assertion, so its own line holds no expect() call.
+    const plan = planSpecMutations(
+      [
+        "test('t', async ({ page }) => {",
+        '  await expect(page).toHaveURL(',
+        '    /\\/dashboard/,',
+        '  ); // @primary-assert',
+        '});',
+      ].join('\n'),
+    );
+    const m = cannotMutation(plan);
+    expect(m.markerLine).toBe(4);
+    expect(m.assertLine).toBe(4);
+    expect(m.cannotMutate).toBe('no expect() call found on this line');
   });
 });
 

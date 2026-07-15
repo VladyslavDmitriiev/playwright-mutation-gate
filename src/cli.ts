@@ -35,6 +35,13 @@ const program = new Command()
       '(values containing spaces are not supported)',
   )
   .showHelpAfterError()
+  .addHelpText(
+    'after',
+    '\nMarking:\n' +
+      '  Put `// @primary-assert` at the end of the primary assertion line,\n' +
+      '  or on its own line right above it. One marker per test().\n' +
+      '    await expect(page.getByText(\'Saved\')).toBeVisible(); // @primary-assert',
+  )
   .action(async (specPaths: string[], opts: CliOptions) => {
     const missing = specPaths.filter((p) => !existsSync(p));
     if (missing.length > 0) {

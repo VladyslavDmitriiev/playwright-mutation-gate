@@ -37,15 +37,20 @@ supports `playwright test`).
 npm install -D playwright-mutation-gate
 ```
 
-Mark the primary assertion in each test with `// @primary-assert`.
-The marker goes on its own line, right above the assertion. The assertion
+Mark the primary assertion in each test with `// @primary-assert`. Put it at
+the end of the assertion line, or on its own line right above it. The assertion
 itself must be a single-line `expect(...)` call.
 
 ```ts
 test('checkout shows confirmation', async ({ page }) => {
   // ...
+  await expect(page.getByText('Order confirmed')).toBeVisible(); // @primary-assert
+});
+
+// Also valid: the marker on its own line above the assertion.
+test('cart badge updates', async ({ page }) => {
   // @primary-assert
-  await expect(page.getByText('Order confirmed')).toBeVisible();
+  await expect(page.getByTestId('cart-count')).toHaveText('1');
 });
 ```
 

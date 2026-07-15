@@ -43,6 +43,16 @@ export interface SpecPlan {
   malformedMarkerLines: number[];
 }
 
+/**
+ * A valid `// @primary-assert` marker. `sameLine` is true when the marker
+ * trails the assertion on its own line (`expect(x).toY(); // @primary-assert`),
+ * false when it sits on its own line above the assertion.
+ */
+interface Marker {
+  line: number;
+  sameLine: boolean;
+}
+
 interface TestBlock {
   title: string;
   mode: '' | 'only' | 'skip' | 'fixme' | 'fail';
@@ -51,8 +61,8 @@ interface TestBlock {
   /** Char offsets of the call's `(` and its matching `)` (source end when unclosed). */
   open: number;
   close: number;
-  /** 1-based lines of valid markers inside this block. */
-  markers: number[];
+  /** Valid markers inside this block. */
+  markers: Marker[];
 }
 
 /** Read the test title: the first argument when it is a literal without interpolation. */
@@ -133,20 +143,47 @@ export function planSpecMutations(source: string): SpecPlan {
     return false;
   };
 
+  // The `//` line comment on a line (in code context), or null when the line
+  // has none. `codeBefore` distinguishes a trailing marker (assertion code
+  // precedes the comment) from a whole-line one.
+  const lineComment = (n: number): { codeBefore: boolean; text: string } | null => {
+    const start = starts[n]!;
+    const end = start + lines[n]!.length;
+    let c = -1;
+    for (let j = start; j < end; j++) {
+      if (kind[j] === LINE_COMMENT) {
+        c = j;
+        break;
+      }
+    }
+    if (c === -1) return null;
+    let codeBefore = false;
+    for (let j = start; j < c; j++) {
+      if (kind[j] === CODE && !/\s/.test(source[j]!)) {
+        codeBefore = true;
+        break;
+      }
+    }
+    return { codeBefore, text: source.slice(c, end).trim() };
+  };
+
   const strayMarkerLines: number[] = [];
   const malformedMarkerLines: number[] = [];
   for (let n = 0; n < lines.length; n++) {
     const line = lines[n]!;
     if (!line.includes('@primary-assert')) continue;
-    const firstNonWs = starts[n]! + (line.length - line.trimStart().length);
-    // A valid marker is a whole-line `//` comment in code context; the same
-    // text inside a block comment, string or template is not a marker.
-    if (line.trim() !== MARKER || kind[firstNonWs] !== LINE_COMMENT) {
+    // A valid marker is a `// @primary-assert` line comment in code context,
+    // either on its own line (assertion is the next code line) or trailing the
+    // assertion. The same text inside a block comment, string, template, or as
+    // a near-miss (`// @primary-assert: foo`) is not a marker.
+    const lc = lineComment(n);
+    if (!lc || lc.text !== MARKER) {
       malformedMarkerLines.push(n + 1);
       continue;
     }
+    const firstNonWs = starts[n]! + (line.length - line.trimStart().length);
     const block = blocks.find((b) => firstNonWs > b.open && firstNonWs < b.close);
-    if (block) block.markers.push(n + 1);
+    if (block) block.markers.push({ line: n + 1, sameLine: lc.codeBefore });
     else strayMarkerLines.push(n + 1);
   }
 
@@ -162,7 +199,8 @@ export function planSpecMutations(source: string): SpecPlan {
       }
       continue;
     }
-    const base = { testTitle: block.title, testLine, markerLine: block.markers[0]! };
+    const marker = block.markers[0]!;
+    const base = { testTitle: block.title, testLine, markerLine: marker.line };
     if (UNGATEABLE_MODES.has(block.mode)) {
       const why =
         block.mode === 'fail'
@@ -179,13 +217,19 @@ export function planSpecMutations(source: string): SpecPlan {
       });
       continue;
     }
-    // The assertion is the next line after the marker that contains code
-    // (blank and comment-only lines are skipped, not mutated).
-    let target = base.markerLine; // 0-based index of the line after the marker
-    while (target < lines.length && !lineHasCode(target)) target++;
-    if (target >= lines.length) {
-      mutations.push({ ...base, assertLine: null, cannotMutate: 'no code line follows the marker' });
-      continue;
+    // A trailing marker sits on the assertion itself; a whole-line marker
+    // points at the next line that contains code (blank and comment-only lines
+    // are skipped, not mutated).
+    let target: number; // 0-based index of the assertion line
+    if (marker.sameLine) {
+      target = marker.line - 1;
+    } else {
+      target = marker.line; // 0-based index of the line after the marker
+      while (target < lines.length && !lineHasCode(target)) target++;
+      if (target >= lines.length) {
+        mutations.push({ ...base, assertLine: null, cannotMutate: 'no code line follows the marker' });
+        continue;
+      }
     }
     const inverted = invertAssertLine(lines[target]!);
     if ('cannotMutate' in inverted) {
