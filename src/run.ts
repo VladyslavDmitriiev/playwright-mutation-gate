@@ -34,6 +34,8 @@ export interface RunOptions {
   playwrightArgs?: string[];
   /** Command that launches Playwright; default ['npx', 'playwright', 'test']. */
   playwrightCommand?: string[];
+  /** Extra identifiers to treat as test builders (custom fixtures). */
+  testIds?: string[];
 }
 
 export const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
@@ -97,6 +99,7 @@ function runChild(
 
 type RunVerdict =
   | { verdict: 'killed' | 'survived' }
+  | { verdict: 'cannot-mutate'; reason: string }
   | { verdict: 'error'; reason: string };
 
 /**
@@ -106,7 +109,7 @@ type RunVerdict =
  */
 export function verdictFromReport(raw: string): RunVerdict {
   let report: {
-    stats?: { expected?: unknown; unexpected?: unknown; flaky?: unknown };
+    stats?: { expected?: unknown; unexpected?: unknown; flaky?: unknown; skipped?: unknown };
     errors?: { message?: unknown }[];
   };
   try {
@@ -118,10 +121,20 @@ export function verdictFromReport(raw: string): RunVerdict {
   const expected = typeof stats?.expected === 'number' ? stats.expected : null;
   const unexpected = typeof stats?.unexpected === 'number' ? stats.unexpected : null;
   const flaky = typeof stats?.flaky === 'number' ? stats.flaky : null;
+  const skipped = typeof stats?.skipped === 'number' ? stats.skipped : 0;
   if (expected === null || unexpected === null || flaky === null) {
     return { verdict: 'error', reason: 'Playwright JSON report has no stats block' };
   }
   if (expected + unexpected + flaky === 0) {
+    // A test that matched the filter but was skipped at runtime (a conditional
+    // test.skip, e.g. a fixture with no captured session) never executed the
+    // inverted assertion. Reporting survived would be a lie; it is cannot-mutate.
+    if (skipped > 0) {
+      return {
+        verdict: 'cannot-mutate',
+        reason: 'the test was skipped at runtime (conditional test.skip), so the inverted assertion never ran',
+      };
+    }
     const message = report.errors?.map((e) => e.message).find((m) => typeof m === 'string');
     const detail = message ? `: ${(message as string).split('\n', 1)[0]}` : '';
     return { verdict: 'error', reason: `no tests ran under the mutation filter${detail}` };
@@ -241,7 +254,7 @@ export function sweepStaleMutationFiles(dir: string): string[] {
  */
 export async function runSpec(specPath: string, opts: RunOptions = {}): Promise<SpecResult> {
   const source = readFileSync(specPath, 'utf8');
-  const plan = planSpecMutations(source);
+  const plan = planSpecMutations(source, { testIds: opts.testIds });
   const results: MutationResult[] = [];
 
   if (plan.onlyTestLines.length > 0) {
@@ -276,7 +289,7 @@ export async function runSpec(specPath: string, opts: RunOptions = {}): Promise<
         testLine: m.testLine,
         assertLine: m.assertLine,
         verdict: run.verdict,
-        ...(run.verdict === 'error' ? { reason: run.reason } : {}),
+        ...('reason' in run ? { reason: run.reason } : {}),
       });
     }
   }

@@ -43,8 +43,8 @@ function fakePlaywright(dir: string, body: string): string[] {
   return ['node', script];
 }
 
-const report = (expected: number, unexpected: number, flaky = 0): string =>
-  JSON.stringify({ stats: { expected, unexpected, flaky, skipped: 0 }, errors: [] });
+const report = (expected: number, unexpected: number, flaky = 0, skipped = 0): string =>
+  JSON.stringify({ stats: { expected, unexpected, flaky, skipped }, errors: [] });
 
 const WRITES_KILLED_REPORT = `
 require('node:fs').writeFileSync(process.env.PLAYWRIGHT_JSON_OUTPUT_NAME, ${JSON.stringify(report(0, 1))});
@@ -75,6 +75,12 @@ describe('verdictFromReport', () => {
 
   it('reads survived from an all-green run', () => {
     expect(verdictFromReport(report(1, 0))).toEqual({ verdict: 'survived' });
+  });
+
+  it('is cannot-mutate when the matched test was skipped at runtime', () => {
+    const v = verdictFromReport(report(0, 0, 0, 1));
+    expect(v).toMatchObject({ verdict: 'cannot-mutate' });
+    expect((v as { reason: string }).reason).toContain('skipped at runtime');
   });
 
   it('is an error when no tests ran, quoting the first report error', () => {

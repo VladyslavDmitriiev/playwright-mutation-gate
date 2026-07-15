@@ -17,6 +17,7 @@ interface CliOptions {
   json: boolean;
   requireSentinel: boolean;
   playwrightArgs?: string;
+  testId: string[];
 }
 
 const program = new Command()
@@ -33,6 +34,14 @@ const program = new Command()
     '--playwright-args <args>',
     'extra arguments passed to `npx playwright test`, split on spaces\n' +
       '(values containing spaces are not supported)',
+  )
+  .option(
+    '--test-id <name>',
+    'treat <name> as a test builder in addition to `test` (repeatable);\n' +
+      'for custom fixtures imported by name (import { authedTest } from ...).\n' +
+      'Local `const x = test.extend(...)` and `test as x` renames are auto-detected',
+    (value: string, acc: string[]) => acc.concat(value),
+    [],
   )
   .showHelpAfterError()
   .addHelpText(
@@ -54,7 +63,7 @@ const program = new Command()
     for (const spec of specPaths) {
       process.stderr.write(`gating ${spec}\n`);
       try {
-        results.push(await runSpec(spec, { playwrightArgs }));
+        results.push(await runSpec(spec, { playwrightArgs, testIds: opts.testId }));
       } catch (err) {
         console.error(`failed to gate ${spec}: ${err instanceof Error ? err.message : String(err)}`);
         process.exit(2);

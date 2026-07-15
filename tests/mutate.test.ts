@@ -426,6 +426,136 @@ describe('planSpecMutations: trailing markers', () => {
   });
 });
 
+describe('planSpecMutations: custom test fixtures', () => {
+  it('auto-detects a local test.extend() alias', () => {
+    const src = [
+      "import { test as base } from '@playwright/test';",
+      'const authedTest = base.extend({ session: async ({}, use) => use(1) });',
+      "authedTest('sees dashboard', async ({ page }) => {",
+      '  await expect(page.getByText("Hi")).toBeVisible(); // @primary-assert',
+      '});',
+    ].join('\n');
+    const plan = planSpecMutations(src);
+    expect(plan.strayMarkerLines).toEqual([]);
+    expect(plan.malformedMarkerLines).toEqual([]);
+    expect(plan.unmarkedTests).toEqual([]);
+    const m = okMutation(plan);
+    expect(m.testTitle).toBe('sees dashboard');
+    expect(changedLines(src, m.mutatedSource)).toEqual([4]);
+  });
+
+  it('follows a chained extend (b = a.extend)', () => {
+    const src = [
+      'const a = test.extend({});',
+      'const b = a.extend({});',
+      "b('t', async ({ page }) => {",
+      '  expect(1).toBe(1); // @primary-assert',
+      '});',
+    ].join('\n');
+    const plan = planSpecMutations(src);
+    expect(plan.mutations).toHaveLength(1);
+    expect(plan.strayMarkerLines).toEqual([]);
+  });
+
+  it('recognizes a renamed import as a test builder', () => {
+    const src = [
+      "import { test as authedTest } from './fixtures';",
+      "authedTest('t', async ({ page }) => {",
+      '  expect(1).toBe(1); // @primary-assert',
+      '});',
+    ].join('\n');
+    const plan = planSpecMutations(src);
+    expect(plan.mutations).toHaveLength(1);
+    expect(plan.strayMarkerLines).toEqual([]);
+  });
+
+  it('needs --test-id for a fixture imported by its own name', () => {
+    const src = [
+      "import { authedTest } from './fixtures';",
+      "authedTest('t', async ({ page }) => {",
+      '  expect(1).toBe(1); // @primary-assert',
+      '});',
+    ].join('\n');
+    // Without the id, the call is invisible and its marker is stray.
+    const blind = planSpecMutations(src);
+    expect(blind.mutations).toEqual([]);
+    expect(blind.strayMarkerLines).toEqual([3]);
+    // With it, the block is planned like a normal test.
+    const seen = planSpecMutations(src, { testIds: ['authedTest'] });
+    expect(seen.mutations).toHaveLength(1);
+    expect(seen.strayMarkerLines).toEqual([]);
+  });
+
+  it('handles a file mixing bare test and a custom fixture', () => {
+    const src = [
+      'const authedTest = test.extend({});',
+      "test('anon', async ({ page }) => {",
+      '  expect(1).toBe(1); // @primary-assert',
+      '});',
+      "authedTest('member', async ({ page }) => {",
+      '  expect(2).toBe(2); // @primary-assert',
+      '});',
+    ].join('\n');
+    const plan = planSpecMutations(src);
+    expect(plan.mutations).toHaveLength(2);
+    expect(plan.mutations.map((m) => m.testTitle)).toEqual(['anon', 'member']);
+  });
+
+  it('counts an unmarked custom-fixture test in the sentinel', () => {
+    const src = [
+      'const authedTest = test.extend({});',
+      "authedTest('no marker here', async ({ page }) => {",
+      '  expect(1).toBe(1);',
+      '});',
+    ].join('\n');
+    const plan = planSpecMutations(src);
+    expect(plan.mutations).toEqual([]);
+    expect(plan.unmarkedTests).toEqual([{ title: 'no marker here', line: 2 }]);
+  });
+});
+
+describe('planSpecMutations: runtime skip modifier vs declaration', () => {
+  it('ignores a conditional skip modifier and keeps its enclosing test intact', () => {
+    const src = [
+      'const authedTest = test.extend({});',
+      "authedTest('dormant', async ({ page }) => {",
+      "  authedTest.skip(!process.env.SESSION, 'no session');",
+      '  await expect(page.getByText("Hi")).toBeVisible(); // @primary-assert',
+      '});',
+    ].join('\n');
+    const plan = planSpecMutations(src);
+    // The .skip(!cond) call is not a block: one test, one marker, no strays.
+    expect(plan.mutations).toHaveLength(1);
+    expect(plan.strayMarkerLines).toEqual([]);
+    const m = okMutation(plan);
+    expect(m.testTitle).toBe('dormant');
+    expect(changedLines(src, m.mutatedSource)).toEqual([4]);
+  });
+
+  it('still treats test.skip("title", fn) as a skipped declaration', () => {
+    const src = [
+      "test.skip('always skipped', async ({ page }) => {",
+      '  expect(1).toBe(1); // @primary-assert',
+      '});',
+    ].join('\n');
+    const plan = planSpecMutations(src);
+    const m = cannotMutation(plan);
+    expect(m.cannotMutate).toContain('never runs');
+  });
+
+  it('ignores a bare runtime test.skip(cond) with no enclosing marker', () => {
+    const src = [
+      "test('t', async ({ page }) => {",
+      '  test.skip(process.env.CI === undefined);',
+      '  expect(1).toBe(1); // @primary-assert',
+      '});',
+    ].join('\n');
+    const plan = planSpecMutations(src);
+    expect(plan.mutations).toHaveLength(1);
+    expect(plan.unmarkedTests).toEqual([]);
+  });
+});
+
 describe('mutation files', () => {
   it.each([
     { spec: 'fixtures/hollow.spec.ts', index: 1, path: 'fixtures/hollow.pmg-mutation-1.spec.ts' },

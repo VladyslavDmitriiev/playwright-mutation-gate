@@ -27,6 +27,16 @@ export type Mutation =
       cannotMutate: string;
     };
 
+export interface PlanOptions {
+  /**
+   * Extra identifiers to treat as test builders, on top of `test` and the
+   * auto-detected `.extend` chains and renamed imports. For custom fixtures
+   * imported by their own name from another module (`import { authedTest }
+   * from './fixtures'`), which cannot be detected without resolving the import.
+   */
+  testIds?: string[];
+}
+
 export interface SpecPlan {
   /** One entry per marked test: either a mutated copy or a cannot-mutate reason. */
   mutations: Mutation[];
@@ -88,20 +98,67 @@ function readTitle(src: string, open: number): string {
   return title;
 }
 
-const TEST_ANCHOR = /\btest\s*(?:\.\s*(only|skip|fixme|fail)\s*)?\(/g;
+const IDENT = '[A-Za-z_$][\\w$]*';
 
-function findTestBlocks(src: string, kind: Uint8Array): TestBlock[] {
+/** True when the first argument at `open` (the call's `(`) is a string literal. */
+function firstArgIsStringLiteral(src: string, open: number): boolean {
+  let i = open + 1;
+  while (i < src.length && /\s/.test(src[i]!)) i++;
+  const c = src[i];
+  return c === "'" || c === '"' || c === '`';
+}
+
+/**
+ * The set of identifiers that declare a test in this file. Always `test`, plus
+ * any passed in explicitly (`--test-id`), plus auto-detected custom fixtures:
+ * a local `const X = <known>.extend(...)` chain, or a renamed import
+ * (`import { test as X }`). Resolved to a fixpoint so chained extends and
+ * renames of just-discovered ids are picked up too.
+ */
+function collectTestIds(src: string, kind: Uint8Array, extra: string[]): Set<string> {
+  const ids = new Set<string>(['test', ...extra]);
+  const renameRe = new RegExp(`\\b(${IDENT})\\s+as\\s+(${IDENT})`, 'g');
+  const extendRe = new RegExp(`\\b(?:const|let|var)\\s+(${IDENT})\\s*=\\s*(${IDENT})\\s*\\.\\s*extend\\s*\\(`, 'g');
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const m of src.matchAll(renameRe)) {
+      if (kind[m.index] !== CODE) continue;
+      if (ids.has(m[1]!) && !ids.has(m[2]!)) {
+        ids.add(m[2]!);
+        changed = true;
+      }
+    }
+    for (const m of src.matchAll(extendRe)) {
+      if (kind[m.index] !== CODE) continue;
+      if (ids.has(m[2]!) && !ids.has(m[1]!)) {
+        ids.add(m[1]!);
+        changed = true;
+      }
+    }
+  }
+  return ids;
+}
+
+function findTestBlocks(src: string, kind: Uint8Array, ids: Set<string>): TestBlock[] {
+  const alt = [...ids].sort((a, b) => b.length - a.length).join('|');
+  const anchor = new RegExp(`\\b(?:${alt})\\s*(?:\\.\\s*(only|skip|fixme|fail)\\s*)?\\(`, 'g');
   const blocks: TestBlock[] = [];
-  for (const m of src.matchAll(TEST_ANCHOR)) {
+  for (const m of src.matchAll(anchor)) {
     if (kind[m.index] !== CODE) continue;
     // Excludes member calls like `t.test(...)`; `test.describe(` and
     // `test.step(` never match the regex in the first place.
     if (m.index > 0 && src[m.index - 1] === '.') continue;
+    const mode = (m[1] ?? '') as TestBlock['mode'];
     const open = m.index + m[0].length - 1;
+    // `test.skip('title', fn)` declares a skipped test; `test.skip(!cond)` is a
+    // runtime modifier statement inside a test body. Only the declaration form
+    // (string title) is a block; the modifier is left to sit inside its test.
+    if (UNGATEABLE_MODES.has(mode) && !firstArgIsStringLiteral(src, open)) continue;
     const close = findCloseMasked(src, kind, open);
     blocks.push({
       title: readTitle(src, open),
-      mode: (m[1] ?? '') as TestBlock['mode'],
+      mode,
       anchor: m.index,
       open,
       close: close === -1 ? src.length : close,
@@ -121,9 +178,10 @@ const UNGATEABLE_MODES = new Set(['skip', 'fixme', 'fail']);
  * test. Anything the gate cannot honestly mutate is reported with a reason,
  * never skipped silently.
  */
-export function planSpecMutations(source: string): SpecPlan {
+export function planSpecMutations(source: string, opts: PlanOptions = {}): SpecPlan {
   const kind = lex(source);
-  const blocks = findTestBlocks(source, kind);
+  const ids = collectTestIds(source, kind, opts.testIds ?? []);
+  const blocks = findTestBlocks(source, kind, ids);
   const lines = source.split('\n');
 
   // Char offset of each line start, to map offsets to 1-based line numbers.

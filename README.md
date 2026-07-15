@@ -84,6 +84,31 @@ a newly added test without `// @primary-assert` shows up as:
 
 Pass `--no-require-sentinel` to opt out while you're marking an existing suite.
 
+## Custom test fixtures
+
+If your tests are declared through a custom fixture instead of the bare `test`,
+the gate finds it automatically in two cases: a local `.extend` chain and a
+renamed import.
+
+```ts
+import { test as base } from '@playwright/test';
+const authedTest = base.extend({ /* ... */ });   // auto-detected
+
+authedTest('sees dashboard', async ({ page }) => {
+  await expect(page.getByText('Welcome')).toBeVisible(); // @primary-assert
+});
+```
+
+When the fixture is imported by its own name from another module, name it with
+`--test-id` (repeatable):
+
+```bash
+npx playwright-mutation-gate tests/dashboard.spec.ts --test-id authedTest
+```
+
+A runtime `authedTest.skip(condition)` inside a test is respected: if the test
+skips, the mutation reports `cannot-mutate` rather than a false `survived`.
+
 ## CI recipe
 
 ```yaml
@@ -118,6 +143,7 @@ Options:
   --json                    machine-readable JSON report
   --no-require-sentinel     do not fail on tests without a marker
   --playwright-args <args>  extra arguments for playwright test
+  --test-id <name>          treat <name> as a test builder (repeatable)
   -V, --version             output the version number
   -h, --help                display help for command
 ```
