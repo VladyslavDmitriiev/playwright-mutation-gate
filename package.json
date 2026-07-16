@@ -1,7 +1,7 @@
 {
   "name": "playwright-mutation-gate",
-  "version": "0.0.1",
-  "description": "Mutation testing for Playwright assertions: invert each test's primary assertion and fail the run if the test stays green. Name reservation; v0.1.0 in development.",
+  "version": "0.1.0",
+  "description": "Mutation testing for Playwright assertions: invert each test's primary assertion and fail the run if the test stays green.",
   "keywords": [
     "playwright",
     "mutation-testing",
