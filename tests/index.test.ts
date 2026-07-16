@@ -1,6 +1,13 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
 import { describe, expect, it } from 'vitest';
 
 import * as api from '../src/index.js';
+
+const pkg = JSON.parse(
+  readFileSync(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8'),
+) as { exports: { '.': { types?: string; default?: string; import?: string } } };
 
 // The barrel is the package's public contract. This test fails the moment a
 // re-export is renamed or dropped, so a breaking change to the programmatic API
@@ -40,5 +47,15 @@ describe('programmatic API surface', () => {
     );
     expect(summary.killed).toBe(1);
     expect(summary.gatePassed).toBe(true);
+  });
+
+  // Regression guard for 0.2.1: the `.` export must resolve for CommonJS/ts-node
+  // consumers too. An `import`-only condition makes a `require()` of this ESM
+  // package throw ERR_PACKAGE_PATH_NOT_EXPORTED; `default` resolves under any
+  // module system. Do not narrow this back to `import`.
+  it('main export resolves for CJS consumers (default condition)', () => {
+    const dot = pkg.exports['.'];
+    expect(dot.default ?? dot.import).toBe('./dist/index.js');
+    expect(dot.import, 'use "default", not "import" — import-only breaks require()').toBeUndefined();
   });
 });
