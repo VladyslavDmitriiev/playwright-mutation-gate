@@ -166,7 +166,35 @@ Options:
   -h, --help                display help for command
 ```
 
-The package is CLI-only for now. Programmatic API is planned for v0.2.
+## Programmatic API
+
+Since v0.2 the package also exposes a library entry, so a tool can run the gate
+in-process and inspect the structured report instead of shelling out to the CLI
+and parsing `--json`.
+
+```ts
+import { runSpec, summarize } from 'playwright-mutation-gate';
+
+const spec = await runSpec('tests/checkout.spec.ts', {
+  testIds: ['authedTest'],            // extra test builders, same as --test-id
+  playwrightArgs: ['--project=chromium', '--retries=0'],
+});
+const summary = summarize([spec], { requireSentinel: true });
+
+if (!summary.gatePassed) {
+  const hollow = spec.results.filter((r) => r.verdict === 'survived');
+  console.error(`${hollow.length} assertion(s) do not gate the result`);
+  process.exit(1);
+}
+```
+
+`runSpec(specPath, opts?)` returns a `SpecResult` (per-assertion `verdict`:
+`killed` / `survived` / `cannot-mutate` / `error`, plus unmarked/stray/malformed
+markers). `summarize(specs, opts)` folds one or more results into a `Summary`
+with the `gatePassed` verdict. `jsonReport` and `renderTable` produce the CLI's
+two output formats. Advanced: `planSpecMutations` and `invertAssertLine` expose
+the mutation planner and the single-line inverter directly. Full types ship with
+the package.
 
 ## Limitations
 
