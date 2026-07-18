@@ -55,5 +55,13 @@
   },
   "dependencies": {
     "commander": "^15.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/VladyslavDmitriiev/playwright-mutation-gate.git"
+  },
+  "homepage": "https://github.com/VladyslavDmitriiev/playwright-mutation-gate#readme",
+  "bugs": {
+    "url": "https://github.com/VladyslavDmitriiev/playwright-mutation-gate/issues"
   }
 }
