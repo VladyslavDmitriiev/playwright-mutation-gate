@@ -34,12 +34,14 @@ export {
 export {
   planSpecMutations,
   analyzeSpec,
+  parseGateSkip,
   MARKER,
   type SpecPlan,
   type SpecAnalysis,
   type MarkedTest,
   type Mutation,
   type PlanOptions,
+  type GateSkip,
 } from './mutate.js';
 
 export { invertAssertLine, type InvertResult } from './invert.js';

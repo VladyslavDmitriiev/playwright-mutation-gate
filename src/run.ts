@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative } from 'node:path';
 
 import { planBehaviorMutations, type BehaviorMutation } from './behavior.js';
-import { planSpecMutations, writeMutationFile, type Mutation, type SpecPlan } from './mutate.js';
+import { planSpecMutations, writeMutationFile, type GateSkip, type Mutation, type SpecPlan } from './mutate.js';
 
 export type Verdict = 'killed' | 'survived' | 'cannot-mutate' | 'error';
 
@@ -16,6 +16,8 @@ export interface MutationResult {
   verdict: Verdict;
   /** Present for cannot-mutate and error verdicts. */
   reason?: string;
+  /** A valid @gate-skip acknowledgement on this test, for cannot-mutate verdicts. */
+  gateSkip?: GateSkip;
 }
 
 /**
@@ -45,6 +47,7 @@ export interface SpecResult {
   unmarkedTests: SpecPlan['unmarkedTests'];
   strayMarkerLines: number[];
   malformedMarkerLines: number[];
+  malformedGateSkipLines: number[];
   /** Behavior mutation results, present only when the behavior pass ran. */
   behavior?: BehaviorResult[];
 }
@@ -423,6 +426,7 @@ export async function runSpec(specPath: string, opts: RunOptions = {}): Promise<
           assertLine: m.assertLine,
           verdict: 'cannot-mutate',
           reason: m.cannotMutate,
+          ...(m.gateSkip !== undefined ? { gateSkip: m.gateSkip } : {}),
         });
         continue;
       }
@@ -443,6 +447,7 @@ export async function runSpec(specPath: string, opts: RunOptions = {}): Promise<
     unmarkedTests: plan.unmarkedTests,
     strayMarkerLines: plan.strayMarkerLines,
     malformedMarkerLines: plan.malformedMarkerLines,
+    malformedGateSkipLines: plan.malformedGateSkipLines,
   };
 
   if (opts.behavior) {

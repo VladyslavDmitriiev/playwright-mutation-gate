@@ -3,6 +3,16 @@ import type { BehaviorVerdict, SpecResult, Verdict } from './run.js';
 export interface GateOptions {
   /** When true (default), tests without a @primary-assert marker fail the gate. */
   requireSentinel: boolean;
+  /** "Today" for @gate-skip expiry checks; defaults to the current date. */
+  now?: Date;
+}
+
+/** Format a date as YYYY-MM-DD in local time, so expiry compares lexically. */
+function ymd(date: Date): string {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
 }
 
 export interface Summary {
@@ -13,6 +23,16 @@ export interface Summary {
   unmarkedTests: number;
   strayMarkers: number;
   malformedMarkers: number;
+  /**
+   * @gate-skip tallies. `acknowledgedSkips`: cannot-mutate verdicts covered by
+   * a valid, unexpired acknowledgement - accepted, does NOT fail the gate.
+   * `expiredSkips`: the acknowledgement's expires date has passed, so the skip
+   * fails closed again. `malformedGateSkip`: a @gate-skip that does not parse or
+   * is misplaced - fails the gate, like a malformed @primary-assert.
+   */
+  acknowledgedSkips: number;
+  expiredSkips: number;
+  malformedGateSkip: number;
   /**
    * Behavior mutation tallies, present only when the behavior pass ran.
    * `behaviorKilled`: the test caught the corrupted value. `weak`: the test
@@ -47,6 +67,9 @@ export function summarize(specs: SpecResult[], opts: GateOptions): Summary {
     unmarkedTests: 0,
     strayMarkers: 0,
     malformedMarkers: 0,
+    acknowledgedSkips: 0,
+    expiredSkips: 0,
+    malformedGateSkip: 0,
     behaviorRan: false,
     behaviorKilled: 0,
     weak: 0,
@@ -54,16 +77,23 @@ export function summarize(specs: SpecResult[], opts: GateOptions): Summary {
     behaviorErrors: 0,
     gatePassed: true,
   };
+  const today = ymd(opts.now ?? new Date());
   for (const spec of specs) {
     for (const m of spec.results) {
       if (m.verdict === 'killed') s.killed++;
       else if (m.verdict === 'survived') s.survived++;
-      else if (m.verdict === 'cannot-mutate') s.cannotMutate++;
-      else s.errors++;
+      else if (m.verdict === 'cannot-mutate') {
+        // A cannot-mutate covered by a valid @gate-skip is accepted until it
+        // expires; expired ones fail closed again. Uncovered ones fail as before.
+        if (m.gateSkip === undefined) s.cannotMutate++;
+        else if (today > m.gateSkip.expires) s.expiredSkips++;
+        else s.acknowledgedSkips++;
+      } else s.errors++;
     }
     s.unmarkedTests += spec.unmarkedTests.length;
     s.strayMarkers += spec.strayMarkerLines.length;
     s.malformedMarkers += spec.malformedMarkerLines.length;
+    s.malformedGateSkip += spec.malformedGateSkipLines.length;
     if (spec.behavior !== undefined) {
       s.behaviorRan = true;
       for (const b of spec.behavior) {
@@ -80,6 +110,8 @@ export function summarize(specs: SpecResult[], opts: GateOptions): Summary {
     s.errors === 0 &&
     s.strayMarkers === 0 &&
     s.malformedMarkers === 0 &&
+    s.expiredSkips === 0 &&
+    s.malformedGateSkip === 0 &&
     (!opts.requireSentinel || s.unmarkedTests === 0) &&
     s.weak === 0 &&
     s.behaviorErrors === 0;
@@ -138,11 +170,27 @@ export function renderTable(specs: SpecResult[], opts: RenderOptions): string {
   const row = (label: string, color: string, title: string, line: string): string =>
     '  ' + paint(color, label.padEnd(labelWidth)) + '  ' + clip(title).padEnd(titleWidth) + '  ' + line;
 
+  const today = ymd(opts.now ?? new Date());
   const lines: string[] = [];
   for (const spec of specs) {
     lines.push(spec.specPath);
     for (const m of spec.results) {
       const at = m.assertLine === null ? ':?' : `:${m.assertLine}`;
+      // An acknowledged (unexpired) @gate-skip reads as accepted, not failing;
+      // an expired one reads as a failure that fell back closed.
+      if (m.verdict === 'cannot-mutate' && m.gateSkip !== undefined) {
+        const expired = today > m.gateSkip.expires;
+        const label = expired ? 'expired-skip' : 'acknowledged';
+        const color = expired ? '\x1b[31m' : '\x1b[32m';
+        lines.push(row(label, color, m.testTitle, at));
+        const gs = m.gateSkip;
+        const detail =
+          `owner=${gs.owner} expires=${gs.expires}` +
+          (gs.reason !== undefined ? ` reason="${gs.reason}"` : '') +
+          (expired ? ' (EXPIRED)' : '');
+        lines.push('  ' + ' '.repeat(labelWidth) + '  ' + detail);
+        continue;
+      }
       lines.push(row(m.verdict, VERDICT_COLOR[m.verdict], m.testTitle, at));
       if (m.reason !== undefined) {
         lines.push('  ' + ' '.repeat(labelWidth) + '  ' + m.reason);
@@ -156,6 +204,9 @@ export function renderTable(specs: SpecResult[], opts: RenderOptions): string {
     }
     for (const line of spec.malformedMarkerLines) {
       lines.push(`  malformed @primary-assert marker at line ${line}`);
+    }
+    for (const line of spec.malformedGateSkipLines) {
+      lines.push(`  malformed @gate-skip marker at line ${line} (needs owner= and a valid expires=YYYY-MM-DD on a test)`);
     }
     if (spec.behavior !== undefined && spec.behavior.length > 0) {
       lines.push('  behavior:');
@@ -183,6 +234,8 @@ export function renderTable(specs: SpecResult[], opts: RenderOptions): string {
         (opts.requireSentinel ? '' : ' (not enforced)'),
     );
   }
+  if (s.acknowledgedSkips > 0) counts.push(`${s.acknowledgedSkips} acknowledged`);
+  if (s.expiredSkips > 0) counts.push(`${s.expiredSkips} expired-skip`);
   lines.push(counts.join(', '));
   if (s.behaviorRan) {
     lines.push(

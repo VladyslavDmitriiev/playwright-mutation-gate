@@ -9,6 +9,7 @@ const spec = (over: Partial<SpecResult> = {}): SpecResult => ({
   unmarkedTests: [],
   strayMarkerLines: [],
   malformedMarkerLines: [],
+  malformedGateSkipLines: [],
   ...over,
 });
 

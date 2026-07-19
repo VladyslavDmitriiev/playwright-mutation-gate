@@ -25,6 +25,8 @@ export type Mutation =
       /** 1-based line of the assertion candidate; null when none was located. */
       assertLine: number | null;
       cannotMutate: string;
+      /** A valid @gate-skip acknowledgement decorating this test, if any. */
+      gateSkip?: GateSkip;
     };
 
 export interface PlanOptions {
@@ -51,6 +53,8 @@ export interface SpecPlan {
   onlyTestLines: number[];
   /** 1-based lines mentioning @primary-assert that do not form a valid marker. */
   malformedMarkerLines: number[];
+  /** 1-based lines mentioning @gate-skip that do not form a valid, placed marker. */
+  malformedGateSkipLines: number[];
 }
 
 /**
@@ -59,6 +63,18 @@ export interface SpecPlan {
  * (planSpecMutations) and behavior planning (planBehaviorMutations) so the
  * marker/block parser lives in one place.
  */
+/**
+ * A parsed, valid `// @gate-skip owner=.. expires=YYYY-MM-DD reason=".."`
+ * acknowledgement decorating a test. It turns a skip's cannot-mutate verdict
+ * from a gate failure into an accepted, time-boxed one - until `expires`.
+ */
+export interface GateSkip {
+  owner: string;
+  /** ISO date (YYYY-MM-DD) after which the acknowledgement expires. */
+  expires: string;
+  reason?: string;
+}
+
 export interface MarkedTest {
   title: string;
   /** 1-based line of the test() declaration. */
@@ -75,6 +91,8 @@ export interface MarkedTest {
   assertLine: number | null;
   /** Set when assertLine is null: why the assertion line could not be located. */
   resolveError: string | null;
+  /** A valid @gate-skip acknowledgement decorating this test, if any. */
+  gateSkip?: GateSkip;
 }
 
 /**
@@ -91,6 +109,8 @@ export interface SpecAnalysis {
   strayMarkerLines: number[];
   onlyTestLines: number[];
   malformedMarkerLines: number[];
+  /** 1-based lines mentioning @gate-skip that do not form a valid, placed marker. */
+  malformedGateSkipLines: number[];
 }
 
 /**
@@ -113,6 +133,45 @@ interface TestBlock {
   close: number;
   /** Valid markers inside this block. */
   markers: Marker[];
+  /** A valid @gate-skip acknowledgement decorating this test, if any. */
+  gateSkip?: GateSkip;
+}
+
+const GATE_SKIP = '@gate-skip';
+const YMD_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+/** True when `s` is a real calendar date in strict YYYY-MM-DD form. */
+export function isValidYmd(s: string): boolean {
+  const m = YMD_RE.exec(s);
+  if (!m) return false;
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  if (mo < 1 || mo > 12 || d < 1 || d > 31) return false;
+  const date = new Date(Date.UTC(y, mo - 1, d));
+  return date.getUTCFullYear() === y && date.getUTCMonth() === mo - 1 && date.getUTCDate() === d;
+}
+
+const attr = (text: string, name: string): string | null => {
+  const m = new RegExp(`(?:^|\\s)${name}=("[^"]*"|\\S+)`).exec(text);
+  if (!m) return null;
+  const raw = m[1]!;
+  return raw.startsWith('"') ? raw.slice(1, -1) : raw;
+};
+
+/**
+ * Parse a `@gate-skip owner=.. expires=YYYY-MM-DD reason=".."` line comment.
+ * Returns the acknowledgement, or null when it is malformed (missing owner or
+ * expires, or an unparseable date) - the same fail-closed policy as a malformed
+ * @primary-assert marker.
+ */
+export function parseGateSkip(commentText: string): GateSkip | null {
+  const body = commentText.replace(/^\/\/\s*/, '');
+  if (!(body === GATE_SKIP || body.startsWith(GATE_SKIP + ' '))) return null;
+  const rest = body.slice(GATE_SKIP.length);
+  const owner = attr(rest, 'owner');
+  const expires = attr(rest, 'expires');
+  if (owner === null || owner === '' || expires === null || !isValidYmd(expires)) return null;
+  const reason = attr(rest, 'reason');
+  return reason !== null && reason !== '' ? { owner, expires, reason } : { owner, expires };
 }
 
 /** Read the test title: the first argument when it is a literal without interpolation. */
@@ -287,6 +346,35 @@ export function analyzeSpec(source: string, opts: PlanOptions = {}): SpecAnalysi
     else strayMarkerLines.push(n + 1);
   }
 
+  // A @gate-skip decorates the test whose declaration it sits on (trailing) or
+  // immediately above (its own line, only blank/comment lines between). It must
+  // parse (owner + a real expires date) and land on a test() block; anything
+  // else is malformed and fails closed, like a malformed @primary-assert.
+  const malformedGateSkipLines: number[] = [];
+  for (let n = 0; n < lines.length; n++) {
+    if (!lines[n]!.includes(GATE_SKIP)) continue;
+    const lc = lineComment(n);
+    const parsed = lc ? parseGateSkip(lc.text) : null;
+    if (!lc || parsed === null) {
+      malformedGateSkipLines.push(n + 1);
+      continue;
+    }
+    let declLine: number;
+    if (lc.codeBefore) {
+      declLine = n + 1;
+    } else {
+      let next = n + 1; // 0-based index of the line after the marker
+      while (next < lines.length && !lineHasCode(next)) next++;
+      declLine = next + 1;
+    }
+    const block = blocks.find((b) => lineOf(b.anchor) === declLine);
+    if (!block || block.gateSkip !== undefined) {
+      malformedGateSkipLines.push(n + 1);
+      continue;
+    }
+    block.gateSkip = parsed;
+  }
+
   const markedTests: MarkedTest[] = [];
   const unmarkedTests: { title: string; line: number }[] = [];
   const onlyTestLines: number[] = [];
@@ -325,10 +413,21 @@ export function analyzeSpec(source: string, opts: PlanOptions = {}): SpecAnalysi
       close: block.close,
       assertLine,
       resolveError,
+      ...(block.gateSkip !== undefined ? { gateSkip: block.gateSkip } : {}),
     });
   }
 
-  return { source, lines, kind, markedTests, unmarkedTests, strayMarkerLines, onlyTestLines, malformedMarkerLines };
+  return {
+    source,
+    lines,
+    kind,
+    markedTests,
+    unmarkedTests,
+    strayMarkerLines,
+    onlyTestLines,
+    malformedMarkerLines,
+    malformedGateSkipLines,
+  };
 }
 
 /**
@@ -342,30 +441,34 @@ export function planSpecMutations(source: string, opts: PlanOptions = {}): SpecP
   const mutations: Mutation[] = [];
   for (const t of markedTests) {
     const base = { testTitle: t.title, testLine: t.testLine, markerLine: t.markerLine };
+    // A @gate-skip rides along on every cannot-mutate verdict for this test, so
+    // the gate can treat an acknowledged skip as accepted rather than failing.
+    const gs = t.gateSkip !== undefined ? { gateSkip: t.gateSkip } : {};
     if (UNGATEABLE_MODES.has(t.mode)) {
       const why =
         t.mode === 'fail'
           ? 'test.fail() expects failure, so a mutation verdict would be meaningless'
           : `test.${t.mode}() never runs, so a mutation cannot be observed`;
-      mutations.push({ ...base, assertLine: null, cannotMutate: why });
+      mutations.push({ ...base, ...gs, assertLine: null, cannotMutate: why });
       continue;
     }
     if (t.markerCount > 1) {
       mutations.push({
         ...base,
+        ...gs,
         assertLine: null,
         cannotMutate: `found ${t.markerCount} @primary-assert markers in one test, expected exactly one`,
       });
       continue;
     }
     if (t.assertLine === null) {
-      mutations.push({ ...base, assertLine: null, cannotMutate: t.resolveError ?? 'assertion line not found' });
+      mutations.push({ ...base, ...gs, assertLine: null, cannotMutate: t.resolveError ?? 'assertion line not found' });
       continue;
     }
     const target = t.assertLine - 1;
     const inverted = invertAssertLine(lines[target]!);
     if ('cannotMutate' in inverted) {
-      mutations.push({ ...base, assertLine: t.assertLine, cannotMutate: inverted.cannotMutate });
+      mutations.push({ ...base, ...gs, assertLine: t.assertLine, cannotMutate: inverted.cannotMutate });
       continue;
     }
     const mutatedLines = lines.slice();
@@ -378,6 +481,7 @@ export function planSpecMutations(source: string, opts: PlanOptions = {}): SpecP
     unmarkedTests: analysis.unmarkedTests,
     strayMarkerLines: analysis.strayMarkerLines,
     malformedMarkerLines: analysis.malformedMarkerLines,
+    malformedGateSkipLines: analysis.malformedGateSkipLines,
     onlyTestLines: analysis.onlyTestLines,
   };
 }

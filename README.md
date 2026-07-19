@@ -109,6 +109,36 @@ npx playwright-mutation-gate tests/dashboard.spec.ts --test-id authedTest
 A runtime `authedTest.skip(condition)` inside a test is respected: if the test
 skips, the mutation reports `cannot-mutate` rather than a false `survived`.
 
+## Acknowledged skips
+
+A skipped test reports `cannot-mutate` and fails the gate: its assertion never
+runs, so there is nothing to verify. That is the right default, but it leaves no
+room for a skip the team has *consciously* accepted for a while. The two escapes
+are both bad: keep the gate red until someone fixes the test (so people stop
+running it), or work around the skip so it quietly lives for months with no
+owner and no deadline.
+
+A `// @gate-skip` marker turns that skip into a loan with a due date. Put it on
+its own line right above the test, or trailing the declaration:
+
+```ts
+// @gate-skip owner=vlad expires=2026-08-15 reason="checkout redesign in flight"
+test.skip('checkout shows confirmation', async ({ page }) => {
+  // @primary-assert
+  await expect(page.getByText('Order confirmed')).toBeVisible();
+});
+```
+
+- Before `expires`, the verdict stays `cannot-mutate` but is reported as
+  **acknowledged** (owner, expiry and reason in the table and `--json`), and the
+  run can exit 0.
+- After `expires`, the gate **fails closed** again. Extending the deadline means
+  editing the marker, a deliberate commit, not silent drift.
+- `owner` and a real `expires=YYYY-MM-DD` are required. A marker missing either,
+  with an unparseable date, or not sitting on a test is **malformed** and fails
+  the gate, same as a malformed `@primary-assert`.
+- Unmarked skips keep the default: `cannot-mutate`, gate fails.
+
 ## CI recipe
 
 ```yaml
@@ -291,7 +321,9 @@ test was skipped at runtime (conditional test.skip), so the inverted
 assertion never ran"). In
 practice this is a feature: a `test.skip(true, ...)` from months ago looks
 identical to a healthy passing spec in normal CI output, and the gate is
-often what surfaces it.
+often what surfaces it. When a skip is a conscious, temporary decision, an
+[`// @gate-skip`](#acknowledged-skips) marker records its owner and expiry so
+the gate accepts it until the deadline instead of staying red.
 
 ## Why
 
