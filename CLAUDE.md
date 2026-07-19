@@ -21,6 +21,9 @@ parent workspace (`../../oss/mutation-gate-spec.md`, `mutation-gate-sprints.md`)
   - `behavior-weak.spec.ts` - asserts a value the UI reconstructs client-side, so
     `--behavior` corruption leaves it green (weak). Do not "fix" it - being weak
     is its job; it is what inversion cannot catch.
+  - `acknowledged-skip.spec.ts` - a `test.skip` with a `// @gate-skip owner=..
+    expires=.. reason=..` marker; the gate accepts it (acknowledged) until the
+    far-future expiry instead of failing. Do not "fix" it.
 
 ## Commands
 

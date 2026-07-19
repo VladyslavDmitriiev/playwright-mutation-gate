@@ -41,6 +41,7 @@ describe('programmatic API surface', () => {
           unmarkedTests: [],
           strayMarkerLines: [],
           malformedMarkerLines: [],
+          malformedGateSkipLines: [],
         },
       ],
       { requireSentinel: true },
