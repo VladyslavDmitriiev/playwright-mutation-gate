@@ -152,6 +152,49 @@ do not want the full sweep on every push. Two patterns that work well:
   catching it a day later is fine. `--playwright-args` is available if you
   need to shard or point at a specific config.
 
+## Behavior mutation mode (`--behavior`)
+
+Assertion inversion answers "can this test fail". It cannot answer "does this
+test fail when the thing it names breaks". An assertion on a value that renders
+on every page is killed by inversion and clears the gate, even if the feature it
+claims to check is broken.
+
+`--behavior` adds a second, opt-in pass that closes part of that gap. Instead of
+inverting the assertion, it keeps it intact and corrupts the *value the
+assertion names* in the response, using Playwright's own `page.route()` to
+rewrite the body and headers in transit. Then it re-runs and expects red.
+
+```bash
+npx playwright-mutation-gate "tests/**/*.spec.ts" --behavior
+```
+
+- **killed** -- the test failed once its named value was broken. (A red here can
+  also be flow breakage rather than the assertion itself; the report says so.)
+- **weak** -- the test stayed green while the value it names was broken. The
+  assertion does not actually depend on the behavior it claims to check. This
+  fails the gate.
+- **cannot-locate** -- the named value never appeared in a rewritable response,
+  so nothing was corrupted. Reported honestly and, unlike `cannot-mutate`, this
+  does **not** fail the gate: a value that is not in an interceptable response
+  (a visibility check, a client-computed string, an API-request-fixture call) is
+  expected, not a defect.
+
+The two modes compose and neither replaces the other. Inversion is cheap and
+catches assertions that cannot fail at all (dead selectors, missing `await`,
+silent skips). Behavior mutation is expensive and catches weak assertions.
+Running `--behavior` performs both passes, so **the run cost roughly doubles**;
+keep it for a nightly sweep or the specs a PR touches rather than every push.
+
+**v1 scope: exact string values.** Behavior mutation locates a plain string
+literal argument (`toContain`, `toContainText`, `toHaveText`, `toHaveValue`,
+`toBe('...')`) and corrupts every occurrence in HTML/JSON bodies and header
+values. Numbers, status codes, regex/URL matchers, `toHaveCount`,
+`toBeVisible`, negated matchers, interpolated values and request-only fixtures
+all report `cannot-locate`. Values that are template-rendered or reconstructed
+on the client (common on SPAs) also report `cannot-locate`, since the literal
+never reaches an interceptable response. As with inversion, the gate reports
+what it could not do rather than guessing.
+
 ## CLI reference
 
 ```
@@ -160,6 +203,8 @@ npx playwright-mutation-gate [options] <specs...>
 Options:
   --json                    machine-readable JSON report
   --no-require-sentinel     do not fail on tests without a marker
+  --behavior                also corrupt each asserted value in the response
+                            and expect red (weak assertions fail the gate)
   --playwright-args <args>  extra arguments for playwright test
   --test-id <name>          treat <name> as a test builder (repeatable)
   -V, --version             output the version number
@@ -192,9 +237,12 @@ if (!summary.gatePassed) {
 `killed` / `survived` / `cannot-mutate` / `error`, plus unmarked/stray/malformed
 markers). `summarize(specs, opts)` folds one or more results into a `Summary`
 with the `gatePassed` verdict. `jsonReport` and `renderTable` produce the CLI's
-two output formats. Advanced: `planSpecMutations` and `invertAssertLine` expose
-the mutation planner and the single-line inverter directly. Full types ship with
-the package.
+two output formats. Pass `{ behavior: true }` to also run the behavior pass;
+the result then carries a `behavior` array of `BehaviorResult`s (`killed` /
+`weak` / `cannot-locate` / `error`). Advanced: `planSpecMutations`,
+`planBehaviorMutations`, `invertAssertLine` and `extractAssertValue` expose the
+planners, the single-line inverter and the value extractor directly. Full types
+ship with the package.
 
 ## Limitations
 
@@ -206,6 +254,9 @@ guarantees is narrower and mechanical: every marked assertion actually runs and
 is load-bearing, so the test cannot stay green regardless of what the app does.
 Judging whether the assertion is the *right* one still takes review, or
 application-code mutation testing (Stryker-style), which is a different tool.
+[Behavior mutation mode](#behavior-mutation-mode---behavior) (`--behavior`)
+closes part of this gap for string-valued assertions by corrupting the named
+value in the response and expecting red.
 
 **A kill is slightly generous by construction.** `killed` means the mutated
 run failed, not that the flipped assertion is what failed. Playwright actions
