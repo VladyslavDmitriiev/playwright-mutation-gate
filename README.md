@@ -236,14 +236,14 @@ await page.route('**/*', async (route) => {
 A test that reads fine on review but checks the wrong layer:
 
 ```ts
-// The confirmation greeting is server-rendered, then re-rendered on the client
-// from a data-name attribute. This assertion checks the client render.
+// The confirmation greeting is drawn on the client from a name cached at checkout
+// (localStorage), not from this response. So the assertion checks the cache.
 await expect(page.getByTestId('receipt-greeting')).toHaveText('Thanks, Ada!'); // @primary-assert
 ```
 
 Inversion kills it (flip the text and the test goes red), so it clears the
 standard gate. Behavior mutation corrupts `Thanks, Ada!` in the response; the
-client rebuilds it from `data-name`, the assertion stays green:
+client rebuilds it from the cached name, the assertion stays green:
 
 ```text
 tests/receipt.spec.ts
