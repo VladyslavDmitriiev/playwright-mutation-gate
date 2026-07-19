@@ -19,6 +19,9 @@ describe('planBehaviorMutations: injection', () => {
     expect(hit.value).toBe('Premium');
     expect(hit.mutatedSource).toContain("await page.route('**/*'");
     expect(hit.mutatedSource).toContain('const NEEDLE = "Premium";');
+    // Binary resources are passed through, never decoded as text.
+    expect(hit.mutatedSource).toContain("resourceType === 'image'");
+    expect(hit.mutatedSource).toContain('route.continue()');
     // The original assertion survives untouched.
     expect(hit.mutatedSource).toContain("await expect(page.locator('#x')).toContainText('Premium');");
   });

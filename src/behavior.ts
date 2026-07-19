@@ -170,16 +170,24 @@ function parseDestructuredFixtures(params: string): string[] {
 
 /**
  * Build the route-interception preamble injected at the top of the test body.
- * It fetches each response, replaces every occurrence of the asserted value in
- * the headers and body with a sentinel, and records via PMG_HIT_FILE whether
- * any occurrence was found. `await import('node:fs')` keeps the preamble
- * self-contained, with no top-level import that could clash with the spec.
+ * It fetches each text response, replaces every occurrence of the asserted value
+ * in the headers and body with a sentinel, and records via PMG_HIT_FILE whether
+ * any occurrence was found. Binary resources (images, media, fonts) are passed
+ * straight through: decoding them as text to search for a string would corrupt
+ * them on the way back out, and the asserted value never lives there. A response
+ * with no match is served untouched rather than round-tripped through `text()`.
+ * `await import('node:fs')` keeps the preamble self-contained, with no top-level
+ * import that could clash with the spec.
  */
 function buildPreamble(value: string): string {
   const needle = JSON.stringify(value);
   const replace = JSON.stringify(REPLACE);
   return [
     `  await page.route('**/*', async (route) => {`,
+    `    const resourceType = route.request().resourceType();`,
+    `    if (resourceType === 'image' || resourceType === 'media' || resourceType === 'font') {`,
+    `      return route.continue();`,
+    `    }`,
     `    const resp = await route.fetch();`,
     `    const headers = resp.headers();`,
     `    const NEEDLE = ${needle};`,
@@ -197,7 +205,10 @@ function buildPreamble(value: string): string {
     `      body = body.split(NEEDLE).join(REPLACE);`,
     `      hit = true;`,
     `    }`,
-    `    if (hit && process.env.PMG_HIT_FILE) {`,
+    `    if (!hit) {`,
+    `      return route.fulfill({ response: resp });`,
+    `    }`,
+    `    if (process.env.PMG_HIT_FILE) {`,
     `      const fs = await import('node:fs');`,
     `      fs.appendFileSync(process.env.PMG_HIT_FILE, '1');`,
     `    }`,

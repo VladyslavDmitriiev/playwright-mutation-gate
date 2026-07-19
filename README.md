@@ -231,6 +231,9 @@ await page.route('**/*', async (route) => {
 });
 ```
 
+The real preamble also skips binary responses (images, fonts, media) instead of
+decoding them as text, and serves any response with no match untouched.
+
 ### A worked example
 
 A test that reads fine on review but checks the wrong layer:
