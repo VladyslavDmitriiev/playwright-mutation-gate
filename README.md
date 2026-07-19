@@ -209,6 +209,60 @@ npx playwright-mutation-gate "tests/**/*.spec.ts" --behavior
   (a visibility check, a client-computed string, an API-request-fixture call) is
   expected, not a defect.
 
+### What the gate does for you
+
+You write an ordinary test and mark its main assertion. The gate reads the value
+out of that assertion, writes a throwaway copy of the spec with a `page.route()`
+preamble injected at the top of the test, runs it, and deletes the copy. Your
+spec and the app under test are never touched. The interception happens in the
+browser at the network layer, so it works against any URL the test already drives
+(local, staging, a deployed site) with no access to the app's source.
+
+The preamble it generates per assertion is just this:
+
+```ts
+await page.route('**/*', async (route) => {
+  const resp = await route.fetch();
+  let body = await resp.text();
+  if (body.includes('Thanks, Ada!')) {
+    body = body.split('Thanks, Ada!').join('PMG_MUTATED_VALUE'); // break the named value in transit
+  }
+  await route.fulfill({ response: resp, body });
+});
+```
+
+### A worked example
+
+A test that reads fine on review but checks the wrong layer:
+
+```ts
+// The confirmation greeting is server-rendered, then re-rendered on the client
+// from a data-name attribute. This assertion checks the client render.
+await expect(page.getByTestId('receipt-greeting')).toHaveText('Thanks, Ada!'); // @primary-assert
+```
+
+Inversion kills it (flip the text and the test goes red), so it clears the
+standard gate. Behavior mutation corrupts `Thanks, Ada!` in the response; the
+client rebuilds it from `data-name`, the assertion stays green:
+
+```text
+tests/receipt.spec.ts
+  behavior:
+  weak  Greets the customer by name on the confirmation page  :22
+        the test stayed green while the value it names was broken
+
+behavior: 0 killed, 1 weak, 0 cannot-locate
+Gate FAILED: hollow, unverified or broken assertions above.
+```
+
+A runnable version ships in the
+[ai-qa-pipeline](https://github.com/VladyslavDmitriiev/ai-qa-pipeline) demo repo.
+Clone it and run:
+
+```bash
+npx playwright-mutation-gate tests/behavior-demo/receipt.spec.ts --behavior
+```
+
 The two modes compose and neither replaces the other. Inversion is cheap and
 catches assertions that cannot fail at all (dead selectors, missing `await`,
 silent skips). Behavior mutation is expensive and catches weak assertions.
@@ -224,6 +278,19 @@ all report `cannot-locate`. Values that are template-rendered or reconstructed
 on the client (common on SPAs) also report `cannot-locate`, since the literal
 never reaches an interceptable response. As with inversion, the gate reports
 what it could not do rather than guessing.
+
+**Which stacks it fits.** Behavior mutation needs the asserted string to appear
+verbatim in an HTTP response it can intercept. It fits server-rendered HTML
+(Rails, Django, Laravel, Express templates, Next.js and Nuxt SSR) and any app
+whose API returns the exact string the UI shows. It goes mostly blind on
+client-rendered SPAs that build the text in the browser: if a React or Vue app
+fetches `{"totalCents": 3400}` and renders `$34.00`, or assembles the string
+through i18n or concatenation, the literal never crosses the wire and every such
+assertion comes back `cannot-locate`. The same is true of formatted dates,
+pluralized counts, and anything derived client-side. A mismatched stack costs you
+nothing, since `cannot-locate` does not fail the gate, but it will not gain you
+much either. Inversion still works everywhere; only the behavior pass is
+stack-sensitive.
 
 ## CLI reference
 
