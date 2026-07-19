@@ -17,6 +17,8 @@ export {
   type MutationResult,
   type Verdict,
   type RunOptions,
+  type BehaviorResult,
+  type BehaviorVerdict,
 } from './run.js';
 
 export {
@@ -31,10 +33,17 @@ export {
 // Advanced: build or inspect the mutation plan directly.
 export {
   planSpecMutations,
+  analyzeSpec,
   MARKER,
   type SpecPlan,
+  type SpecAnalysis,
+  type MarkedTest,
   type Mutation,
   type PlanOptions,
 } from './mutate.js';
 
 export { invertAssertLine, type InvertResult } from './invert.js';
+
+export { planBehaviorMutations, type BehaviorMutation } from './behavior.js';
+
+export { extractAssertValue, type AssertValue } from './extract.js';

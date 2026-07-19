@@ -54,6 +54,46 @@ export interface SpecPlan {
 }
 
 /**
+ * One test() block that carries at least one valid `@primary-assert` marker,
+ * with its assertion line already resolved. Shared between inversion planning
+ * (planSpecMutations) and behavior planning (planBehaviorMutations) so the
+ * marker/block parser lives in one place.
+ */
+export interface MarkedTest {
+  title: string;
+  /** 1-based line of the test() declaration. */
+  testLine: number;
+  mode: TestBlock['mode'];
+  /** How many valid markers sit inside this block (>1 is a mistake). */
+  markerCount: number;
+  /** 1-based line of the first marker. */
+  markerLine: number;
+  /** Char offsets of the test call's `(` and its matching `)`. */
+  open: number;
+  close: number;
+  /** 1-based line of the assertion the first marker points at; null when unresolved. */
+  assertLine: number | null;
+  /** Set when assertLine is null: why the assertion line could not be located. */
+  resolveError: string | null;
+}
+
+/**
+ * The parsed view of a spec that both planners build on: the lexed source, the
+ * test() blocks that carry a marker (assertion line resolved), and the
+ * spec-level marker findings (unmarked tests, stray/malformed markers, .only).
+ */
+export interface SpecAnalysis {
+  source: string;
+  lines: string[];
+  kind: Uint8Array;
+  markedTests: MarkedTest[];
+  unmarkedTests: { title: string; line: number }[];
+  strayMarkerLines: number[];
+  onlyTestLines: number[];
+  malformedMarkerLines: number[];
+}
+
+/**
  * A valid `// @primary-assert` marker. `sameLine` is true when the marker
  * trails the assertion on its own line (`expect(x).toY(); // @primary-assert`),
  * false when it sits on its own line above the assertion.
@@ -171,14 +211,16 @@ function findTestBlocks(src: string, kind: Uint8Array, ids: Set<string>): TestBl
 // test.skip/fixme never run and test.fail inverts pass/fail semantics, so a
 // mutation verdict on them would be a lie; they are also exempt from sentinel
 // accounting. test.only runs and is treated like a plain test.
-const UNGATEABLE_MODES = new Set(['skip', 'fixme', 'fail']);
+export const UNGATEABLE_MODES = new Set(['skip', 'fixme', 'fail']);
 
 /**
- * Parse a spec source and plan its mutations: one inverted copy per marked
- * test. Anything the gate cannot honestly mutate is reported with a reason,
- * never skipped silently.
+ * Parse a spec source into the shared view both planners build on: which
+ * test() blocks carry a valid `@primary-assert` marker (with the assertion
+ * line already resolved), plus the spec-level marker findings. The parser
+ * (lexer, test-id collection, block finding, marker association, assertion-line
+ * resolution) lives here so inversion and behavior planning cannot diverge.
  */
-export function planSpecMutations(source: string, opts: PlanOptions = {}): SpecPlan {
+export function analyzeSpec(source: string, opts: PlanOptions = {}): SpecAnalysis {
   const kind = lex(source);
   const ids = collectTestIds(source, kind, opts.testIds ?? []);
   const blocks = findTestBlocks(source, kind, ids);
@@ -245,8 +287,8 @@ export function planSpecMutations(source: string, opts: PlanOptions = {}): SpecP
     else strayMarkerLines.push(n + 1);
   }
 
-  const mutations: Mutation[] = [];
-  const unmarkedTests: SpecPlan['unmarkedTests'] = [];
+  const markedTests: MarkedTest[] = [];
+  const unmarkedTests: { title: string; line: number }[] = [];
   const onlyTestLines: number[] = [];
   for (const block of blocks) {
     const testLine = lineOf(block.anchor);
@@ -258,48 +300,86 @@ export function planSpecMutations(source: string, opts: PlanOptions = {}): SpecP
       continue;
     }
     const marker = block.markers[0]!;
-    const base = { testTitle: block.title, testLine, markerLine: marker.line };
-    if (UNGATEABLE_MODES.has(block.mode)) {
-      const why =
-        block.mode === 'fail'
-          ? 'test.fail() expects failure, so a mutation verdict would be meaningless'
-          : `test.${block.mode}() never runs, so a mutation cannot be observed`;
-      mutations.push({ ...base, assertLine: null, cannotMutate: why });
-      continue;
-    }
-    if (block.markers.length > 1) {
-      mutations.push({
-        ...base,
-        assertLine: null,
-        cannotMutate: `found ${block.markers.length} @primary-assert markers in one test, expected exactly one`,
-      });
-      continue;
-    }
-    // A trailing marker sits on the assertion itself; a whole-line marker
-    // points at the next line that contains code (blank and comment-only lines
-    // are skipped, not mutated).
+    // Resolve the assertion line for the first marker: a trailing marker sits
+    // on the assertion itself; a whole-line marker points at the next line that
+    // contains code (blank and comment-only lines are skipped, not mutated).
+    let assertLine: number | null = null;
+    let resolveError: string | null = null;
     let target: number; // 0-based index of the assertion line
     if (marker.sameLine) {
       target = marker.line - 1;
+      assertLine = target + 1;
     } else {
       target = marker.line; // 0-based index of the line after the marker
       while (target < lines.length && !lineHasCode(target)) target++;
-      if (target >= lines.length) {
-        mutations.push({ ...base, assertLine: null, cannotMutate: 'no code line follows the marker' });
-        continue;
-      }
+      if (target >= lines.length) resolveError = 'no code line follows the marker';
+      else assertLine = target + 1;
     }
+    markedTests.push({
+      title: block.title,
+      testLine,
+      mode: block.mode,
+      markerCount: block.markers.length,
+      markerLine: marker.line,
+      open: block.open,
+      close: block.close,
+      assertLine,
+      resolveError,
+    });
+  }
+
+  return { source, lines, kind, markedTests, unmarkedTests, strayMarkerLines, onlyTestLines, malformedMarkerLines };
+}
+
+/**
+ * Parse a spec source and plan its mutations: one inverted copy per marked
+ * test. Anything the gate cannot honestly mutate is reported with a reason,
+ * never skipped silently.
+ */
+export function planSpecMutations(source: string, opts: PlanOptions = {}): SpecPlan {
+  const analysis = analyzeSpec(source, opts);
+  const { lines, markedTests } = analysis;
+  const mutations: Mutation[] = [];
+  for (const t of markedTests) {
+    const base = { testTitle: t.title, testLine: t.testLine, markerLine: t.markerLine };
+    if (UNGATEABLE_MODES.has(t.mode)) {
+      const why =
+        t.mode === 'fail'
+          ? 'test.fail() expects failure, so a mutation verdict would be meaningless'
+          : `test.${t.mode}() never runs, so a mutation cannot be observed`;
+      mutations.push({ ...base, assertLine: null, cannotMutate: why });
+      continue;
+    }
+    if (t.markerCount > 1) {
+      mutations.push({
+        ...base,
+        assertLine: null,
+        cannotMutate: `found ${t.markerCount} @primary-assert markers in one test, expected exactly one`,
+      });
+      continue;
+    }
+    if (t.assertLine === null) {
+      mutations.push({ ...base, assertLine: null, cannotMutate: t.resolveError ?? 'assertion line not found' });
+      continue;
+    }
+    const target = t.assertLine - 1;
     const inverted = invertAssertLine(lines[target]!);
     if ('cannotMutate' in inverted) {
-      mutations.push({ ...base, assertLine: target + 1, cannotMutate: inverted.cannotMutate });
+      mutations.push({ ...base, assertLine: t.assertLine, cannotMutate: inverted.cannotMutate });
       continue;
     }
     const mutatedLines = lines.slice();
     mutatedLines[target] = inverted.ok;
-    mutations.push({ ...base, assertLine: target + 1, mutatedSource: mutatedLines.join('\n') });
+    mutations.push({ ...base, assertLine: t.assertLine, mutatedSource: mutatedLines.join('\n') });
   }
 
-  return { mutations, unmarkedTests, strayMarkerLines, malformedMarkerLines, onlyTestLines };
+  return {
+    mutations,
+    unmarkedTests: analysis.unmarkedTests,
+    strayMarkerLines: analysis.strayMarkerLines,
+    malformedMarkerLines: analysis.malformedMarkerLines,
+    onlyTestLines: analysis.onlyTestLines,
+  };
 }
 
 /**

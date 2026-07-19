@@ -30,3 +30,26 @@ describe('mutation gate against the fixture site', () => {
     expect(leftoverCopies()).toEqual([]);
   });
 });
+
+describe('behavior mutation against the fixture site', () => {
+  it('kills the strong spec: corrupting the rendered value fails the assertion', async () => {
+    const result = await runSpec(join(fixturesDir, 'behavior-strong.spec.ts'), { cwd: root, behavior: true });
+    expect(result.behavior).toHaveLength(1);
+    expect(result.behavior![0]).toMatchObject({ verdict: 'killed', value: 'Premium' });
+    expect(leftoverCopies()).toEqual([]);
+  });
+
+  it('flags the weak spec: the value is corrupted but the assertion stays green', async () => {
+    const result = await runSpec(join(fixturesDir, 'behavior-weak.spec.ts'), { cwd: root, behavior: true });
+    expect(result.behavior).toHaveLength(1);
+    expect(result.behavior![0]).toMatchObject({ verdict: 'weak', value: 'Premium' });
+    expect(leftoverCopies()).toEqual([]);
+  });
+
+  it('reports cannot-locate when the assertion names no rewritable value', async () => {
+    const result = await runSpec(join(fixturesDir, 'honest.spec.ts'), { cwd: root, behavior: true });
+    expect(result.behavior).toHaveLength(1);
+    expect(result.behavior![0]!.verdict).toBe('cannot-locate');
+    expect(leftoverCopies()).toEqual([]);
+  });
+});
