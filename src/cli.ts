@@ -16,6 +16,7 @@ const pkg = JSON.parse(
 interface CliOptions {
   json: boolean;
   requireSentinel: boolean;
+  behavior: boolean;
   playwrightArgs?: string;
   testId: string[];
 }
@@ -30,6 +31,13 @@ const program = new Command()
   .argument('<specs...>', 'Playwright spec files to gate')
   .option('--json', 'print a machine-readable JSON report instead of the table', false)
   .option('--no-require-sentinel', 'do not fail the gate when a test() has no @primary-assert marker')
+  .option(
+    '--behavior',
+    'also run behavior mutation: corrupt each @primary-assert value in the response\n' +
+      'via page.route and expect red. A test that stays green is weak and fails the\n' +
+      'gate. Opt-in: this roughly doubles the run cost.',
+    false,
+  )
   .option(
     '--playwright-args <args>',
     'extra arguments passed to `npx playwright test`, split on spaces\n' +
@@ -49,7 +57,12 @@ const program = new Command()
     '\nMarking:\n' +
       '  Put `// @primary-assert` at the end of the primary assertion line,\n' +
       '  or on its own line right above it. One marker per test().\n' +
-      '    await expect(page.getByText(\'Saved\')).toBeVisible(); // @primary-assert',
+      '    await expect(page.getByText(\'Saved\')).toBeVisible(); // @primary-assert\n' +
+      '\nModes:\n' +
+      '  Default: assertion inversion (proves the test can fail at all).\n' +
+      '  --behavior: also corrupt the asserted value in the response and expect\n' +
+      '  red (proves the test fails when the thing it names breaks). The modes\n' +
+      '  compose; weak assertions fail the gate, cannot-locate is informational.',
   )
   .action(async (specPaths: string[], opts: CliOptions) => {
     const missing = specPaths.filter((p) => !existsSync(p));
@@ -63,7 +76,7 @@ const program = new Command()
     for (const spec of specPaths) {
       process.stderr.write(`gating ${spec}\n`);
       try {
-        results.push(await runSpec(spec, { playwrightArgs, testIds: opts.testId }));
+        results.push(await runSpec(spec, { playwrightArgs, testIds: opts.testId, behavior: opts.behavior }));
       } catch (err) {
         console.error(`failed to gate ${spec}: ${err instanceof Error ? err.message : String(err)}`);
         process.exit(2);

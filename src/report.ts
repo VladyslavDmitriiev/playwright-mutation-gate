@@ -1,4 +1,4 @@
-import type { SpecResult, Verdict } from './run.js';
+import type { BehaviorVerdict, SpecResult, Verdict } from './run.js';
 
 export interface GateOptions {
   /** When true (default), tests without a @primary-assert marker fail the gate. */
@@ -14,10 +14,26 @@ export interface Summary {
   strayMarkers: number;
   malformedMarkers: number;
   /**
+   * Behavior mutation tallies, present only when the behavior pass ran.
+   * `behaviorKilled`: the test caught the corrupted value. `weak`: the test
+   * stayed green while the value it names was broken (a hollow assertion) -
+   * this fails the gate. `behaviorCannotLocate`: the value could not be found
+   * in a rewritable response - reported honestly and, unlike inversion's
+   * cannot-mutate, does NOT fail the gate (a value not living in an
+   * interceptable response is expected, not a defect). `behaviorErrors`: the
+   * behavior run itself failed - fails the gate.
+   */
+  behaviorRan: boolean;
+  behaviorKilled: number;
+  weak: number;
+  behaviorCannotLocate: number;
+  behaviorErrors: number;
+  /**
    * Green means proven: every marked assertion was killed under inversion and
    * nothing was left unverified. Any survived, cannot-mutate or error verdict
    * fails the gate, as do marker mistakes (stray or malformed markers) and,
-   * under require-sentinel, tests with no marker at all.
+   * under require-sentinel, tests with no marker at all. When the behavior pass
+   * ran, any weak or behavior-error verdict also fails the gate.
    */
   gatePassed: boolean;
 }
@@ -31,6 +47,11 @@ export function summarize(specs: SpecResult[], opts: GateOptions): Summary {
     unmarkedTests: 0,
     strayMarkers: 0,
     malformedMarkers: 0,
+    behaviorRan: false,
+    behaviorKilled: 0,
+    weak: 0,
+    behaviorCannotLocate: 0,
+    behaviorErrors: 0,
     gatePassed: true,
   };
   for (const spec of specs) {
@@ -43,6 +64,15 @@ export function summarize(specs: SpecResult[], opts: GateOptions): Summary {
     s.unmarkedTests += spec.unmarkedTests.length;
     s.strayMarkers += spec.strayMarkerLines.length;
     s.malformedMarkers += spec.malformedMarkerLines.length;
+    if (spec.behavior !== undefined) {
+      s.behaviorRan = true;
+      for (const b of spec.behavior) {
+        if (b.verdict === 'killed') s.behaviorKilled++;
+        else if (b.verdict === 'weak') s.weak++;
+        else if (b.verdict === 'cannot-locate') s.behaviorCannotLocate++;
+        else s.behaviorErrors++;
+      }
+    }
   }
   s.gatePassed =
     s.survived === 0 &&
@@ -50,9 +80,18 @@ export function summarize(specs: SpecResult[], opts: GateOptions): Summary {
     s.errors === 0 &&
     s.strayMarkers === 0 &&
     s.malformedMarkers === 0 &&
-    (!opts.requireSentinel || s.unmarkedTests === 0);
+    (!opts.requireSentinel || s.unmarkedTests === 0) &&
+    s.weak === 0 &&
+    s.behaviorErrors === 0;
   return s;
 }
+
+const BEHAVIOR_VERDICT_COLOR: Record<BehaviorVerdict, string> = {
+  killed: '\x1b[32m',
+  weak: '\x1b[31m',
+  'cannot-locate': '\x1b[33m',
+  error: '\x1b[33m',
+};
 
 export function jsonReport(specs: SpecResult[], opts: GateOptions): string {
   return JSON.stringify({ specs, summary: summarize(specs, opts) }, null, 2);
@@ -92,6 +131,7 @@ export function renderTable(specs: SpecResult[], opts: RenderOptions): string {
       ...specs.flatMap((spec) => [
         ...spec.results.map((m) => clip(m.testTitle).length),
         ...spec.unmarkedTests.map((t) => clip(t.title).length),
+        ...(spec.behavior ?? []).map((b) => clip(b.testTitle).length),
       ]),
     ),
   );
@@ -117,6 +157,16 @@ export function renderTable(specs: SpecResult[], opts: RenderOptions): string {
     for (const line of spec.malformedMarkerLines) {
       lines.push(`  malformed @primary-assert marker at line ${line}`);
     }
+    if (spec.behavior !== undefined && spec.behavior.length > 0) {
+      lines.push('  behavior:');
+      for (const b of spec.behavior) {
+        const at = b.assertLine === null ? ':?' : `:${b.assertLine}`;
+        lines.push(row(b.verdict, BEHAVIOR_VERDICT_COLOR[b.verdict], b.testTitle, at));
+        if (b.reason !== undefined) {
+          lines.push('  ' + ' '.repeat(labelWidth) + '  ' + b.reason);
+        }
+      }
+    }
     lines.push('');
   }
 
@@ -134,6 +184,17 @@ export function renderTable(specs: SpecResult[], opts: RenderOptions): string {
     );
   }
   lines.push(counts.join(', '));
+  if (s.behaviorRan) {
+    lines.push(
+      'behavior: ' +
+        [
+          `${s.behaviorKilled} killed`,
+          `${s.weak} weak`,
+          `${s.behaviorCannotLocate} cannot-locate`,
+          `${s.behaviorErrors} errors`,
+        ].join(', '),
+    );
+  }
   lines.push(
     s.gatePassed
       ? paint('\x1b[1;32m', 'Gate passed: every marked assertion can fail.')

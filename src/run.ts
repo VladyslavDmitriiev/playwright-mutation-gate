@@ -1,8 +1,9 @@
 import { spawn } from 'node:child_process';
-import { mkdtempSync, readdirSync, readFileSync, rmSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative } from 'node:path';
 
+import { planBehaviorMutations, type BehaviorMutation } from './behavior.js';
 import { planSpecMutations, writeMutationFile, type Mutation, type SpecPlan } from './mutate.js';
 
 export type Verdict = 'killed' | 'survived' | 'cannot-mutate' | 'error';
@@ -17,12 +18,35 @@ export interface MutationResult {
   reason?: string;
 }
 
+/**
+ * Behavior mutation verdicts. `killed`: the test caught the corrupted value
+ * (or the flow broke around it). `weak`: the test stayed green while the value
+ * it names was broken - a hollow assertion. `cannot-locate`: the value never
+ * appeared in a rewritable response, reported honestly and NOT a gate failure.
+ * `error`: the run itself failed (spawn, timeout, no report).
+ */
+export type BehaviorVerdict = 'killed' | 'weak' | 'cannot-locate' | 'error';
+
+export interface BehaviorResult {
+  testTitle: string;
+  testLine: number;
+  /** 1-based line of the assertion whose value was corrupted; null when none. */
+  assertLine: number | null;
+  verdict: BehaviorVerdict;
+  /** The corrupted value, when one was located. */
+  value?: string;
+  /** Explanation for weak / cannot-locate / error, and the flow-breakage caveat on killed. */
+  reason?: string;
+}
+
 export interface SpecResult {
   specPath: string;
   results: MutationResult[];
   unmarkedTests: SpecPlan['unmarkedTests'];
   strayMarkerLines: number[];
   malformedMarkerLines: number[];
+  /** Behavior mutation results, present only when the behavior pass ran. */
+  behavior?: BehaviorResult[];
 }
 
 export interface RunOptions {
@@ -36,6 +60,8 @@ export interface RunOptions {
   playwrightCommand?: string[];
   /** Extra identifiers to treat as test builders (custom fixtures). */
   testIds?: string[];
+  /** When true, also run the behavior mutation pass (page.route value corruption). */
+  behavior?: boolean;
 }
 
 export const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
@@ -207,6 +233,123 @@ export async function runMutation(
   }
 }
 
+type BehaviorRunVerdict =
+  | { verdict: 'killed' | 'weak' | 'cannot-locate'; reason?: string }
+  | { verdict: 'error'; reason: string };
+
+/**
+ * Decide a behavior verdict from a Playwright JSON report and whether the
+ * injected handler recorded a hit (the named value was found and corrupted).
+ * Mirrors verdictFromReport's stats reading, then layers the behavior
+ * semantics: no hit means the value never reached a rewritable response
+ * (cannot-locate); a hit plus a red test is killed; a hit plus a green test is
+ * a hollow assertion (weak).
+ */
+export function behaviorVerdictFromReport(raw: string, hit: boolean): BehaviorRunVerdict {
+  let report: {
+    stats?: { expected?: unknown; unexpected?: unknown; flaky?: unknown; skipped?: unknown };
+    errors?: { message?: unknown }[];
+  };
+  try {
+    report = JSON.parse(raw) as typeof report;
+  } catch {
+    return { verdict: 'error', reason: 'Playwright JSON report is not valid JSON' };
+  }
+  const stats = report.stats;
+  const expected = typeof stats?.expected === 'number' ? stats.expected : null;
+  const unexpected = typeof stats?.unexpected === 'number' ? stats.unexpected : null;
+  const flaky = typeof stats?.flaky === 'number' ? stats.flaky : null;
+  const skipped = typeof stats?.skipped === 'number' ? stats.skipped : 0;
+  if (expected === null || unexpected === null || flaky === null) {
+    return { verdict: 'error', reason: 'Playwright JSON report has no stats block' };
+  }
+  if (expected + unexpected + flaky === 0) {
+    if (skipped > 0) {
+      return {
+        verdict: 'cannot-locate',
+        reason: 'the test was skipped at runtime, so its behavior could not be observed',
+      };
+    }
+    const message = report.errors?.map((e) => e.message).find((m) => typeof m === 'string');
+    const detail = message ? `: ${(message as string).split('\n', 1)[0]}` : '';
+    return { verdict: 'error', reason: `no tests ran under the mutation filter${detail}` };
+  }
+  if (!hit) {
+    return {
+      verdict: 'cannot-locate',
+      reason: 'the named value never appeared in an intercepted response, so nothing was corrupted',
+    };
+  }
+  if (unexpected + flaky > 0) {
+    return {
+      verdict: 'killed',
+      reason: 'the test failed once the named value was corrupted (a red here could also be flow breakage, not the assertion)',
+    };
+  }
+  return { verdict: 'weak', reason: 'the test stayed green while the value it names was broken' };
+}
+
+/**
+ * Run one behavior mutation: write the injected copy (route interception on top
+ * of the intact assertion), run Playwright against exactly that test, and read
+ * the verdict from the JSON report plus the hit-file the handler writes when it
+ * corrupts a response. The copy, the report dir and the hit-file are always
+ * removed.
+ */
+export async function runBehaviorMutation(
+  specPath: string,
+  index: number,
+  mutation: Extract<BehaviorMutation, { mutatedSource: string }>,
+  opts: RunOptions = {},
+): Promise<BehaviorRunVerdict> {
+  const cwd = opts.cwd ?? process.cwd();
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const command = opts.playwrightCommand ?? DEFAULT_COMMAND;
+  const copyPath = writeMutationFile(specPath, index, mutation.mutatedSource);
+  const reportDir = mkdtempSync(join(tmpdir(), 'pmg-'));
+  const reportPath = join(reportDir, 'report.json');
+  const hitPath = join(reportDir, 'hit');
+  try {
+    const target = `${relative(cwd, copyPath) || copyPath}:${mutation.testLine}`;
+    const outcome = await runChild(
+      [...command, target, '--reporter=json', ...(opts.playwrightArgs ?? [])],
+      cwd,
+      { ...process.env, PLAYWRIGHT_JSON_OUTPUT_NAME: reportPath, PMG_HIT_FILE: hitPath },
+      timeoutMs,
+    );
+    if (outcome.spawnError) {
+      return { verdict: 'error', reason: `could not launch ${command.join(' ')}: ${outcome.spawnError}` };
+    }
+    if (outcome.timedOut) {
+      return {
+        verdict: 'error',
+        reason: `Playwright run timed out after ${Math.round(timeoutMs / 1000)}s and was killed`,
+      };
+    }
+    let raw: string;
+    try {
+      raw = readFileSync(reportPath, 'utf8');
+    } catch {
+      const tail = outcome.output.trim();
+      return {
+        verdict: 'error',
+        reason:
+          `Playwright exited with code ${outcome.code ?? 'unknown'} without producing a report` +
+          (tail === '' ? '' : `; output tail: ${tail.slice(-500)}`),
+      };
+    }
+    const hit = existsSync(hitPath) && statSync(hitPath).size > 0;
+    return behaviorVerdictFromReport(raw, hit);
+  } finally {
+    try {
+      unlinkSync(copyPath);
+    } catch {
+      // Already gone.
+    }
+    rmSync(reportDir, { recursive: true, force: true });
+  }
+}
+
 function pidIsAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -294,11 +437,66 @@ export async function runSpec(specPath: string, opts: RunOptions = {}): Promise<
     }
   }
 
-  return {
+  const result: SpecResult = {
     specPath,
     results,
     unmarkedTests: plan.unmarkedTests,
     strayMarkerLines: plan.strayMarkerLines,
     malformedMarkerLines: plan.malformedMarkerLines,
   };
+
+  if (opts.behavior) {
+    result.behavior = await runBehaviorPass(specPath, source, plan.onlyTestLines, opts);
+  }
+
+  return result;
+}
+
+/**
+ * Run the behavior mutation pass for one spec: plan the route-interception
+ * mutations and run each one that can be located. A spec containing test.only
+ * is refused (same reason as inversion: .only makes every verdict fiction).
+ */
+async function runBehaviorPass(
+  specPath: string,
+  source: string,
+  onlyTestLines: number[],
+  opts: RunOptions,
+): Promise<BehaviorResult[]> {
+  const plan = planBehaviorMutations(source, { testIds: opts.testIds });
+  const results: BehaviorResult[] = [];
+
+  if (onlyTestLines.length > 0) {
+    const reason =
+      `test.only on line ${onlyTestLines.join(', ')} of ${basename(specPath)} ` +
+      'filters out every other test, so no behavior verdict would be honest; remove .only first';
+    for (const m of plan) {
+      results.push({ testTitle: m.testTitle, testLine: m.testLine, assertLine: m.assertLine, verdict: 'error', reason });
+    }
+    return results;
+  }
+
+  for (const [index, m] of plan.entries()) {
+    if ('cannotLocate' in m) {
+      results.push({
+        testTitle: m.testTitle,
+        testLine: m.testLine,
+        assertLine: m.assertLine,
+        verdict: 'cannot-locate',
+        reason: m.cannotLocate,
+      });
+      continue;
+    }
+    const run = await runBehaviorMutation(specPath, index, m, opts);
+    results.push({
+      testTitle: m.testTitle,
+      testLine: m.testLine,
+      assertLine: m.assertLine,
+      verdict: run.verdict,
+      value: m.value,
+      ...('reason' in run && run.reason !== undefined ? { reason: run.reason } : {}),
+    });
+  }
+
+  return results;
 }
