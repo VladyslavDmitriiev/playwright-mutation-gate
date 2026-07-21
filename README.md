@@ -194,6 +194,16 @@ inverting the assertion, it keeps it intact and corrupts the *value the
 assertion names* in the response, using Playwright's own `page.route()` to
 rewrite the body and headers in transit. Then it re-runs and expects red.
 
+This is not code mutation testing. Stryker-style tools mutate application code
+to score how well your tests notice; this pass leaves both the app and the test
+untouched and instead mutates the **source of truth** the assertion depends on --
+the server value that reaches the browser. It is a *data-dependency* check:
+does the assertion actually ride on the data it claims to check, or on some
+cached, client-computed, or coincidental copy? That framing also sets the
+boundary: the pass only helps where the asserted value crosses the wire as text
+it can intercept, and it says so plainly (`cannot-locate`) everywhere else. See
+[which stacks it fits](#which-stacks-it-fits) below before you reach for it.
+
 ```bash
 npx playwright-mutation-gate "tests/**/*.spec.ts" --behavior
 ```
@@ -282,7 +292,9 @@ on the client (common on SPAs) also report `cannot-locate`, since the literal
 never reaches an interceptable response. As with inversion, the gate reports
 what it could not do rather than guessing.
 
-**Which stacks it fits.** Behavior mutation needs the asserted string to appear
+### Which stacks it fits
+
+Behavior mutation needs the asserted string to appear
 verbatim in an HTTP response it can intercept. It fits server-rendered HTML
 (Rails, Django, Laravel, Express templates, Next.js and Nuxt SSR) and any app
 whose API returns the exact string the UI shows. It goes mostly blind on
