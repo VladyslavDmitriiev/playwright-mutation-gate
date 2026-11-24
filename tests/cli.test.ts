@@ -121,6 +121,17 @@ describe('cli surface', () => {
     expect(cli('--help').stdout).toContain('--concurrency');
   });
 
+  it('verify-fix: documents itself, requires --base, exits 2 outside a git repo', () => {
+    expect(cli('verify-fix', '--help').stdout).toContain('--base <ref>');
+    expect(cli('verify-fix').status).toBe(2);
+    const r = spawnSync('node', [join(process.cwd(), 'dist/cli.js'), 'verify-fix', '--base', 'main'], {
+      cwd: tmpdir(),
+      encoding: 'utf8',
+    });
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain('not a git repository');
+  });
+
   it('--json carries the flat mutations list', () => {
     const parsed = JSON.parse(cli('--json', unmarkedSpec).stdout) as { mutations: unknown[] };
     expect(parsed.mutations).toEqual([]);

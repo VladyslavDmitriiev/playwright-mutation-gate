@@ -14,6 +14,7 @@ import {
 } from './ratchet.js';
 import { githubAnnotations, jsonReport, renderTable, summarize } from './report.js';
 import { createLimiter, runSpec, type SpecResult } from './run.js';
+import { renderFixReport, verifyFix, VerifyFixError } from './verify-fix.js';
 
 // Exit codes: 0 = gate passed, 1 = gate failed (survived / unverified /
 // marker mistakes), 2 = usage or environment error (bad flags, missing file).
@@ -41,6 +42,8 @@ const program = new Command()
       'A test that stays green under inversion is hollow and fails the gate.',
   )
   .version(pkg.version)
+  // Options after `verify-fix` belong to it (--json and --playwright-args exist on both).
+  .enablePositionalOptions()
   .argument('<specs...>', 'Playwright spec files to gate')
   .option('--json', 'print a machine-readable JSON report instead of the table', false)
   .option('--no-require-sentinel', 'do not fail the gate when a test() has no @primary-assert marker')
@@ -182,6 +185,57 @@ const program = new Command()
       }
     }
     process.exit(summarize(results, gate).gatePassed ? 0 : 1);
+  });
+
+interface VerifyFixCliOptions {
+  base: string;
+  json: boolean;
+  testPattern?: string;
+  build: string[];
+  noBuild?: boolean;
+  playwrightArgs?: string;
+}
+
+program
+  .command('verify-fix')
+  .description(
+    'Check that the tests a change adds fail without its fix: in a temporary git\n' +
+      'worktree, roll back every non-test file changed since --base, then run the new\n' +
+      'tests there. Green on the rollback = survived (the test does not prove the fix).\n' +
+      "Needs Playwright's webServer to serve the code from the checkout.",
+  )
+  .argument('[specs...]', 'spec files whose new tests to check (default: changed spec files)')
+  .requiredOption('--base <ref>', 'the ref the change targets (e.g. origin/main)')
+  .option('--json', 'print a machine-readable JSON report', false)
+  .option('--test-pattern <regex>', 'repo-relative paths matching this are test files and are kept')
+  .option(
+    '--build <cmd>',
+    'command to run in the rolled-back tree before the tests (repeatable);\n' +
+      'default: npm run build / typecheck when those scripts exist',
+    (value: string, acc: string[]) => acc.concat(value),
+    [],
+  )
+  .option('--no-build', 'skip the build step')
+  .option('--playwright-args <args>', 'extra arguments passed to `npx playwright test`, split on spaces')
+  .exitOverride()
+  .action(async (specs: string[], o: VerifyFixCliOptions & { build: string[] | false }) => {
+    try {
+      const report = await verifyFix({
+        base: o.base,
+        ...(specs.length > 0 ? { specs } : {}),
+        ...(o.testPattern !== undefined ? { testPattern: new RegExp(o.testPattern) } : {}),
+        ...(o.build === false ? { build: [] } : o.build.length > 0 ? { build: o.build } : {}),
+        playwrightArgs: (o.playwrightArgs ?? '').split(/\s+/).filter(Boolean),
+      });
+      console.log(o.json ? JSON.stringify(report, null, 2) : renderFixReport(report));
+      process.exit(report.passed ? 0 : 1);
+    } catch (err) {
+      if (err instanceof VerifyFixError || err instanceof SyntaxError) {
+        console.error(err.message);
+        process.exit(2);
+      }
+      throw err;
+    }
   });
 
 program.exitOverride();

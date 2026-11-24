@@ -123,12 +123,12 @@ export function createLimiter(concurrency: number): Limiter {
 }
 
 export const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
-const DEFAULT_COMMAND = ['npx', 'playwright', 'test'];
+export const DEFAULT_COMMAND = ['npx', 'playwright', 'test'];
 
 /** Matches the copy names produced by mutationFilePath, pid token included. */
 const MUTATION_FILE_RE = /\.pmg-mutation-\d+-([a-z0-9]+)\./;
 
-interface ChildOutcome {
+export interface ChildOutcome {
   code: number | null;
   timedOut: boolean;
   spawnError?: string;
@@ -138,7 +138,7 @@ interface ChildOutcome {
 
 const OUTPUT_TAIL_LIMIT = 4000;
 
-function runChild(
+export function runChild(
   command: string[],
   cwd: string,
   env: NodeJS.ProcessEnv,
@@ -431,7 +431,7 @@ export function baselineFromReport(raw: string, testLines: number[], specFile: s
 }
 
 /** True when the user already chose a retry count for Playwright. */
-function hasRetriesArg(args: string[]): boolean {
+export function hasRetriesArg(args: string[]): boolean {
   return args.some((a) => a === '--retries' || a.startsWith('--retries='));
 }
 

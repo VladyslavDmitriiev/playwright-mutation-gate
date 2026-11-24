@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.6.0
+
+### Added
+
+- `--concurrency <n>`: run up to n Playwright processes at once (baseline and
+  mutation runs, across all specs) through one shared limiter. Default 1, the
+  old behavior. Library: `createLimiter`, `RunOptions.concurrency` /
+  `limiter`. Parallel runs need a shared web server (see README).
+- `verify-fix --base <ref> [specs...]`: in a temporary git worktree, roll back
+  every non-test file changed since the merge base, build, and run the tests
+  the change adds. `verified` (red without the fix), `survived` (green without
+  it, fails the run), `cannot-verify` (nothing to roll back, the rollback does
+  not build, skipped), plus `baseline-failed` / `flaky` / `error`. Library:
+  `verifyFix`, `renderFixReport`.
+
+### Fixed
+
+- Behavior-pass copies no longer reuse the inversion copies' file indexes, so
+  they cannot collide when runs overlap.
+
 ## 0.5.1
 
 ### Fixed

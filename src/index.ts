@@ -71,3 +71,14 @@ export {
   type RatchetEntry,
   type RatchetUpdate,
 } from './ratchet.js';
+
+export {
+  verifyFix,
+  renderFixReport,
+  VerifyFixError,
+  DEFAULT_TEST_PATTERN,
+  type FixVerdict,
+  type FixResult,
+  type VerifyFixReport,
+  type VerifyFixOptions,
+} from './verify-fix.js';

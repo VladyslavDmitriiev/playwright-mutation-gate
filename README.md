@@ -375,6 +375,46 @@ nothing, since `cannot-locate` does not fail the gate, but it will not gain you
 much either. Inversion still works everywhere; only the behavior pass is
 stack-sensitive.
 
+## Does the test prove the fix? (`verify-fix`)
+
+Mutation answers "can this assertion fail?". A test written together with a
+bug fix has a sharper question to answer: does it fail *without the fix*?
+
+```bash
+npx playwright-mutation-gate verify-fix --base origin/main
+```
+
+In a temporary git worktree, every non-test file changed since the merge base
+with `--base` is rolled back, the PR's tests stay, and the tree is built
+(`npm run build` / `typecheck` when those scripts exist, or your `--build`
+commands; `--no-build` skips it). Then each test the PR adds (a title that does
+not exist at the merge base) runs on HEAD and on the rollback:
+
+- **verified** -- green on HEAD, red on the rollback. The test depends on the fix.
+- **survived** -- green on the rollback too. The test does not prove the fix;
+  fails the run.
+- **baseline-failed** / **flaky** -- the test is red or flaky on HEAD itself.
+- **cannot-verify** -- nothing but tests changed, the rolled-back tree does not
+  build, or the test was skipped. Not a pass.
+- **error** -- a run itself failed.
+
+Exit 0 only when every new test is verified; 1 otherwise; 2 for usage or git
+errors. The working tree is never touched; the worktree is removed afterwards.
+
+Test files are paths matching `--test-pattern` (default: a `test/`, `tests/`,
+`e2e/`, `__tests__/`, `spec(s)/` or `fixtures/` directory, or a `*.spec.*` /
+`*.test.*` name). Spec arguments narrow the check to those files.
+
+It only works when the app under test is served from the checkout, typically
+through Playwright's `webServer`, with `reuseExistingServer` off (a server left
+running from HEAD would be tested instead of the rollback). Tests against a
+deployed environment cannot be checked this way.
+
+**What it cannot catch.** A test that asserts exactly the literal the fix
+introduces (the fix adds the text "Saved", the test expects "Saved") fails on
+the rollback and is reported verified, yet proves only that the literal exists.
+This is the same idea as SWE-bench's `FAIL_TO_PASS`, with the same blind spot.
+
 ## CLI reference
 
 ```
@@ -392,6 +432,14 @@ Options:
   --update-ratchet          shrink (or create) the ratchet file after the run
   --annotations             also print GitHub Actions ::error annotations
   --concurrency <n>         run up to n Playwright processes at once (default 1)
+
+npx playwright-mutation-gate verify-fix --base <ref> [specs...]
+  --base <ref>              the ref the change targets (required)
+  --json                    machine-readable report
+  --test-pattern <regex>    repo-relative paths that count as tests (kept)
+  --build <cmd>             build command for the rolled-back tree (repeatable)
+  --no-build                skip the build step
+  --playwright-args <args>  extra arguments for playwright test
   -V, --version             output the version number
   -h, --help                display help for command
 ```
