@@ -180,6 +180,17 @@ describe('verdictFromReport', () => {
     });
   });
 
+  it('is killed when a wrapper (toPass, test.step) reports its own line for the inverted matcher', () => {
+    const wrapped = { ...target, matcher: 'toEqual', negated: true, assertLine: 33, assertEndLine: 33 };
+    const msg = 'Error: expect(received).not.toEqual(expected) // deep equality';
+    expect(verdictFromReport(failedAt(target.copyFile, 34, msg), wrapped)).toEqual({ verdict: 'killed' });
+    // Same matcher but not the inverted form: some other assertion failed.
+    const other = 'Error: expect(received).toEqual(expected) // deep equality';
+    expect(verdictFromReport(failedAt(target.copyFile, 40, other), wrapped)).toMatchObject({ verdict: 'killed-elsewhere' });
+    // The inverted form, but in another file (a helper): not this assertion.
+    expect(verdictFromReport(failedAt('/x/helper.ts', 34, msg), wrapped)).toMatchObject({ verdict: 'killed-elsewhere' });
+  });
+
   it('strips ANSI color codes from quoted error messages', () => {
     const esc = String.fromCharCode(27);
     const v = verdictFromReport(failedAt('/x/other.ts', 1, `Error: ${esc}[2mexpect(${esc}[22mx) failed`), target);
@@ -223,8 +234,8 @@ describe('verdictFromReport', () => {
 describe('assertSpan', () => {
   it('spans a multi-line statement to where its parentheses balance and names the matcher', () => {
     const src = ['a', '  await expect(', "    page.locator('#x'),", '  ).not.toBeVisible();', 'b'].join('\n');
-    expect(assertSpan(src, 2)).toEqual({ endLine: 4, matcher: 'toBeVisible' });
-    expect(assertSpan("await expect(x).not.toHaveText('a');", 1)).toEqual({ endLine: 1, matcher: 'toHaveText' });
+    expect(assertSpan(src, 2)).toEqual({ endLine: 4, matcher: 'toBeVisible', negated: true });
+    expect(assertSpan("await expect(x).toHaveText('a');", 1)).toEqual({ endLine: 1, matcher: 'toHaveText', negated: false });
   });
 });
 

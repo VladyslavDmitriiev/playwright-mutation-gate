@@ -256,7 +256,8 @@ function describeFailure(f: Failure | null, displayName: (file: string) => strin
  * Where the inverted assertion lives in the mutated copy, so a red run can be
  * checked against it. `copyFile` is the mutated copy, `assertLine`..`assertEndLine`
  * the inverted statement (1-based, inclusive), `matcher` its matcher name (e.g.
- * `toBeVisible`) for reports that carry no location.
+ * `toBeVisible`) and `negated` whether the inverted form carries `.not.`, used
+ * to recognise an error raised by the inverted matcher.
  */
 export interface AssertTarget {
   copyFile: string;
@@ -264,6 +265,20 @@ export interface AssertTarget {
   assertLine: number;
   assertEndLine: number;
   matcher: string | null;
+  negated?: boolean;
+}
+
+/**
+ * True when an error message was raised by the inverted matcher: Playwright
+ * prints the matcher as written, e.g. `expect(locator).not.toBeVisible()`.
+ */
+function fromInvertedMatcher(message: string, target: AssertTarget): boolean {
+  if (!message.includes('expect(')) return false;
+  if (target.matcher === null) return true;
+  const negatedForm = `.not.${target.matcher}`;
+  if (target.negated === true) return message.includes(negatedForm);
+  if (target.negated === false) return message.includes(`.${target.matcher}`) && !message.includes(negatedForm);
+  return message.includes(target.matcher);
 }
 
 /**
@@ -272,8 +287,10 @@ export interface AssertTarget {
  * for many crashes alike, and only the report tells those apart.
  *
  * With a `target`, a red run is only `killed` when the first failure points at
- * the inverted statement (or, if the report has no location, its error comes
- * from the inverted matcher); any other red run is `killed-elsewhere`.
+ * the inverted statement, or its error comes from the inverted matcher and it
+ * is in the mutated file (a wrapper such as `expect(...).toPass()` or
+ * `test.step` reports its own line) or carries no location at all. Any other
+ * red run is `killed-elsewhere`.
  */
 export function verdictFromReport(raw: string, target?: AssertTarget): RunVerdict {
   const parsed = parseReport(raw);
@@ -303,11 +320,8 @@ export function verdictFromReport(raw: string, target?: AssertTarget): RunVerdic
       if (sameFile && failure.line >= target.assertLine && failure.line <= target.assertEndLine) {
         return { verdict: 'killed' };
       }
-    } else if (
-      failure !== null &&
-      failure.message.includes('expect(') &&
-      (target.matcher === null || failure.message.includes(target.matcher))
-    ) {
+      if (sameFile && fromInvertedMatcher(failure.message, target)) return { verdict: 'killed' };
+    } else if (failure !== null && fromInvertedMatcher(failure.message, target)) {
       // No location in the report: accept only an error raised by the inverted matcher.
       return { verdict: 'killed' };
     }
@@ -444,7 +458,10 @@ export async function runBaseline(
  * Locate the inverted statement in the mutated source: from its first line to
  * the line where its parentheses balance (capped), plus its matcher name.
  */
-export function assertSpan(source: string, assertLine: number): { endLine: number; matcher: string | null } {
+export function assertSpan(
+  source: string,
+  assertLine: number,
+): { endLine: number; matcher: string | null; negated: boolean } {
   const lines = source.split('\n');
   let depth = 0;
   let opened = false;
@@ -462,8 +479,9 @@ export function assertSpan(source: string, assertLine: number): { endLine: numbe
     endLine = i + 1;
     if (opened && depth <= 0) break;
   }
-  const matchers = [...text.matchAll(/\.(to[A-Z]\w*)\s*\(/g)];
-  return { endLine, matcher: matchers.length > 0 ? matchers[matchers.length - 1]![1]! : null };
+  const matchers = [...text.matchAll(/(\.not)?\.(to[A-Z]\w*)\s*\(/g)];
+  const last = matchers[matchers.length - 1];
+  return { endLine, matcher: last !== undefined ? last[2]! : null, negated: last?.[1] !== undefined };
 }
 
 /**
@@ -524,6 +542,7 @@ export async function runMutation(
       assertLine: mutation.assertLine,
       assertEndLine: span.endLine,
       matcher: span.matcher,
+      negated: span.negated,
     });
   } finally {
     try {

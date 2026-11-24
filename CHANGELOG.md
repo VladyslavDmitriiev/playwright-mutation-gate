@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.1
+
+### Fixed
+
+- False `killed-elsewhere` when the marked assertion sits inside a wrapper
+  such as `expect(async () => { ... }).toPass()` or `test.step`: Playwright
+  reports the wrapper's line, not the assertion's. A failure in the mutated
+  file whose error comes from the inverted matcher (for example
+  `expect(received).not.toEqual(expected)`) now counts as `killed`. The
+  no-location fallback also checks the negation, not only the matcher name.
+
 ## 0.5.0
 
 Adoption on existing suites and machine-readable output. No verdict or exit

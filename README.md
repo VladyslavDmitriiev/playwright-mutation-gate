@@ -458,8 +458,10 @@ value in the response and expecting red.
 
 **A kill is checked against where the test failed.** Since 0.4.0, `killed`
 requires the first failure in Playwright's report to point into the inverted
-statement. If the report carries no location, the error message must come from
-the inverted matcher. Anything else is `killed-elsewhere`. A test that is red or
+statement, or to come from the inverted matcher (for example
+`expect(received).not.toEqual(...)`) in the same spec file, which covers
+wrappers like `expect(...).toPass()` and `test.step` that report their own
+line. Anything else is `killed-elsewhere`. A test that is red or
 flaky before any mutation is never mutated (`baseline-failed` / `flaky`).
 `survived` has no excuse either way: a test that stays green with its own
 primary assertion inverted is hollow, full stop.
