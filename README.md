@@ -83,8 +83,9 @@ test in isolation.
 - **error** -- the run itself broke (launch failure, timeout, no report).
 
 The baseline is one extra Playwright run per spec covering all its marked
-tests. It runs with `--retries=1` unless you pass your own `--retries` through
-`--`, so a test that only passes on retry is caught as flaky.
+tests. It runs with `--retries=1` unless you pass your own retries
+(`--playwright-args "--retries=2"`), so a test that only passes on retry is
+caught as flaky.
 
 One marker per `test()` block. Markers inside `test.describe` or `test.use`
 callbacks work the same way -- the gate scans each `test()` individually,
@@ -385,7 +386,7 @@ failed, 2 usage or launch error). What can change in an existing pipeline:
   `flaky` or `killed-elsewhere`. That is the point of the release: those kills
   were never proof. Fix the test (or its environment), not the gate.
 - Each spec costs one more Playwright run (the baseline), with `--retries=1`
-  unless you pass your own `--retries` after `--`.
+  unless you pass your own retries via `--playwright-args "--retries=N"`.
 - Code that switches on `verdict` or reads `Summary` should handle the three new
   verdicts and the new `baselineFailed`, `flaky` and `killedElsewhere` counters.
   The `--json` output gains the same fields.
