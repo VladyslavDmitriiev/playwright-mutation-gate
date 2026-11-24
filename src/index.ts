@@ -26,6 +26,11 @@ export {
   summarize,
   jsonReport,
   renderTable,
+  mutationRecords,
+  gateFailures,
+  githubAnnotations,
+  type MutationRecord,
+  type GateFailure,
   type Summary,
   type GateOptions,
   type RenderOptions,
@@ -50,3 +55,17 @@ export { invertAssertLine, type InvertResult } from './invert.js';
 export { planBehaviorMutations, type BehaviorMutation } from './behavior.js';
 
 export { extractAssertValue, type AssertValue } from './extract.js';
+
+export {
+  loadRatchet,
+  applyRatchet,
+  updateRatchet,
+  writeRatchet,
+  staleRatchetEntries,
+  ratchetKeyFile,
+  RatchetError,
+  DEFAULT_RATCHET_FILE,
+  type Ratchet,
+  type RatchetEntry,
+  type RatchetUpdate,
+} from './ratchet.js';

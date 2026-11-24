@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { jsonReport, renderTable, summarize } from '../src/report.js';
+import { gateFailures, githubAnnotations, jsonReport, mutationRecords, renderTable, summarize } from '../src/report.js';
 import type { SpecResult } from '../src/run.js';
 
 const spec = (over: Partial<SpecResult> = {}): SpecResult => ({
@@ -165,5 +165,52 @@ describe('jsonReport', () => {
       unmarkedTests: 1,
       gatePassed: false,
     });
+  });
+});
+
+describe('machine output', () => {
+  const failing = {
+    testTitle: 'boot',
+    testLine: 3,
+    assertLine: 9,
+    verdict: 'killed-elsewhere' as const,
+    reason: 'the mutated test failed at a.spec.ts:4: Error: x, y',
+  };
+
+  it('lists one flat record per mutation, invert and behavior', () => {
+    const specs = [
+      spec({
+        specPath: 'tests/a.spec.ts',
+        results: [killed, failing],
+        behavior: [{ testTitle: 'live assert', testLine: 3, assertLine: 5, verdict: 'weak', value: 'P', reason: 'green' }],
+      }),
+    ];
+    expect(mutationRecords(specs)).toEqual([
+      { mode: 'invert', verdict: 'killed', spec: 'tests/a.spec.ts', testTitle: 'live assert', testLine: 3, assertLine: 5, reason: null },
+      { mode: 'invert', verdict: 'killed-elsewhere', spec: 'tests/a.spec.ts', testTitle: 'boot', testLine: 3, assertLine: 9, reason: failing.reason },
+      { mode: 'behavior', verdict: 'weak', spec: 'tests/a.spec.ts', testTitle: 'live assert', testLine: 3, assertLine: 5, reason: 'green' },
+    ]);
+    const parsed = JSON.parse(jsonReport(specs, STRICT)) as { mutations: unknown[] };
+    expect(parsed.mutations).toHaveLength(3);
+  });
+
+  it('gate failures match the gate verdict', () => {
+    expect(gateFailures([spec({ results: [killed] })], STRICT)).toEqual([]);
+    const f = gateFailures(
+      [spec({ results: [killed, survived], unmarkedTests: [{ title: 'bare', line: 20 }], strayMarkerLines: [30] })],
+      STRICT,
+    );
+    expect(f.map((x) => x.line)).toEqual([survived.assertLine, 20, 30]);
+    expect(f[0]!.message).toContain('survived');
+    expect(gateFailures([spec({ unmarkedTests: [{ title: 'bare', line: 20 }] })], LAX)).toEqual([]);
+  });
+
+  it('prints escaped GitHub ::error annotations with a cwd-relative path', () => {
+    const lines = githubAnnotations([spec({ specPath: '/repo/tests/a,b.spec.ts', results: [failing] })], STRICT, '/repo');
+    expect(lines).toEqual([
+      '::error file=tests/a%2Cb.spec.ts,line=9,title=mutation gate::killed-elsewhere: the mutated test failed at a.spec.ts:4: Error: x, y',
+    ]);
+    const nl = githubAnnotations([spec({ results: [{ ...failing, reason: '50%\nsecond' }] })], STRICT, '/');
+    expect(nl[0]).toContain('50%25%0Asecond');
   });
 });

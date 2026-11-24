@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.5.0
+
+Adoption on existing suites and machine-readable output. No verdict or exit
+code changes.
+
+### Added
+
+- Ratchet file for gradual adoption: `--ratchet [path]` (default
+  `pmg-ratchet.json`) allows the listed unmarked tests, any other unmarked test
+  still fails the gate. `--update-ratchet` creates the file, or shrinks it by
+  dropping entries that are marked or gone; it never adds entries. Summary
+  counter `ratchetedTests`.
+- `--annotations`: one GitHub Actions `::error file=..,line=..` line per gate
+  failure, printed after the table (not with `--json`).
+- `--json` gains a flat `mutations` array: `{ mode, verdict, spec, testTitle,
+  testLine, assertLine, reason }` per mutation, inversion and behavior.
+- Library exports: `mutationRecords`, `gateFailures`, `githubAnnotations`, and
+  the ratchet functions.
+
+### Fixed
+
+- README: own retries go through `--playwright-args "--retries=N"`, not `--`.
+
 ## 0.4.0
 
 The gate stops reporting optimistic kills. Verdicts are only added; existing

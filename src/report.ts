@@ -1,3 +1,5 @@
+import { relative, sep } from 'node:path';
+
 import type { BehaviorVerdict, SpecResult, Verdict } from './run.js';
 
 export interface GateOptions {
@@ -30,6 +32,8 @@ export interface Summary {
   flaky: number;
   killedElsewhere: number;
   unmarkedTests: number;
+  /** Unmarked tests allowed by a ratchet file; reported, never a gate failure. */
+  ratchetedTests: number;
   strayMarkers: number;
   malformedMarkers: number;
   /**
@@ -78,6 +82,7 @@ export function summarize(specs: SpecResult[], opts: GateOptions): Summary {
     flaky: 0,
     killedElsewhere: 0,
     unmarkedTests: 0,
+    ratchetedTests: 0,
     strayMarkers: 0,
     malformedMarkers: 0,
     acknowledgedSkips: 0,
@@ -107,6 +112,7 @@ export function summarize(specs: SpecResult[], opts: GateOptions): Summary {
       } else s.errors++;
     }
     s.unmarkedTests += spec.unmarkedTests.length;
+    s.ratchetedTests += spec.ratchetedTests?.length ?? 0;
     s.strayMarkers += spec.strayMarkerLines.length;
     s.malformedMarkers += spec.malformedMarkerLines.length;
     s.malformedGateSkip += spec.malformedGateSkipLines.length;
@@ -144,8 +150,116 @@ const BEHAVIOR_VERDICT_COLOR: Record<BehaviorVerdict, string> = {
   error: '\x1b[33m',
 };
 
+/**
+ * One stable, flat record per mutation (inversion and behavior), for agents and
+ * CI that want a list to act on rather than the nested per-spec structure.
+ */
+export interface MutationRecord {
+  mode: 'invert' | 'behavior';
+  verdict: Verdict | BehaviorVerdict;
+  spec: string;
+  testTitle: string;
+  testLine: number;
+  assertLine: number | null;
+  reason: string | null;
+}
+
+export function mutationRecords(specs: SpecResult[]): MutationRecord[] {
+  return specs.flatMap((spec) => [
+    ...spec.results.map(
+      (m): MutationRecord => ({
+        mode: 'invert',
+        verdict: m.verdict,
+        spec: spec.specPath,
+        testTitle: m.testTitle,
+        testLine: m.testLine,
+        assertLine: m.assertLine,
+        reason: m.reason ?? null,
+      }),
+    ),
+    ...(spec.behavior ?? []).map(
+      (b): MutationRecord => ({
+        mode: 'behavior',
+        verdict: b.verdict,
+        spec: spec.specPath,
+        testTitle: b.testTitle,
+        testLine: b.testLine,
+        assertLine: b.assertLine,
+        reason: b.reason ?? null,
+      }),
+    ),
+  ]);
+}
+
 export function jsonReport(specs: SpecResult[], opts: GateOptions): string {
-  return JSON.stringify({ specs, summary: summarize(specs, opts) }, null, 2);
+  return JSON.stringify({ specs, summary: summarize(specs, opts), mutations: mutationRecords(specs) }, null, 2);
+}
+
+/** One reason the gate failed, anchored to a spec line. */
+export interface GateFailure {
+  spec: string;
+  line: number;
+  message: string;
+}
+
+const FAILURE_TEXT: Partial<Record<Verdict, string>> = {
+  survived: 'survived: the test stayed green with this assertion inverted, so the assertion is hollow',
+  'cannot-mutate': 'cannot-mutate: the gate could not verify this assertion',
+  error: 'error: the mutation run failed',
+  'baseline-failed': 'baseline-failed',
+  flaky: 'flaky',
+  'killed-elsewhere': 'killed-elsewhere',
+};
+
+/**
+ * Every item that fails the gate, in report order. Mirrors summarize(): a
+ * passing gate yields an empty list.
+ */
+export function gateFailures(specs: SpecResult[], opts: GateOptions): GateFailure[] {
+  const today = ymd(opts.now ?? new Date());
+  const out: GateFailure[] = [];
+  for (const spec of specs) {
+    const push = (line: number, message: string): void => {
+      out.push({ spec: spec.specPath, line, message });
+    };
+    for (const m of spec.results) {
+      if (m.verdict === 'killed') continue;
+      const line = m.assertLine ?? m.testLine;
+      if (m.verdict === 'cannot-mutate' && m.gateSkip !== undefined) {
+        if (today > m.gateSkip.expires) push(line, `expired @gate-skip (expires=${m.gateSkip.expires}): ${m.reason ?? ''}`.trim());
+        continue;
+      }
+      const head = FAILURE_TEXT[m.verdict] ?? m.verdict;
+      push(line, m.reason !== undefined && head !== m.reason ? `${head}: ${m.reason}` : head);
+    }
+    if (opts.requireSentinel) {
+      for (const t of spec.unmarkedTests) push(t.line, `unmarked test (no @primary-assert): ${t.title}`);
+    }
+    for (const line of spec.strayMarkerLines) push(line, '@primary-assert marker outside any test() block');
+    for (const line of spec.malformedMarkerLines) push(line, 'malformed @primary-assert marker');
+    for (const line of spec.malformedGateSkipLines) push(line, 'malformed @gate-skip marker');
+    for (const b of spec.behavior ?? []) {
+      if (b.verdict === 'weak' || b.verdict === 'error') {
+        push(b.assertLine ?? b.testLine, `behavior ${b.verdict}${b.reason !== undefined ? `: ${b.reason}` : ''}`);
+      }
+    }
+  }
+  return out;
+}
+
+/** Escape per the GitHub Actions workflow-command rules. */
+const escapeData = (s: string): string => s.replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+const escapeProperty = (s: string): string => escapeData(s).replace(/:/g, '%3A').replace(/,/g, '%2C');
+
+/**
+ * GitHub Actions `::error` workflow commands, one per gate failure, with the
+ * spec path made relative to `cwd` so the annotation lands on the PR diff.
+ */
+export function githubAnnotations(specs: SpecResult[], opts: GateOptions, cwd = process.cwd()): string[] {
+  return gateFailures(specs, opts).map((f) => {
+    const file = (relative(cwd, f.spec) || f.spec).split(sep).join('/');
+    return `::error file=${escapeProperty(file)},line=${f.line},title=mutation gate::${escapeData(f.message)}`;
+  });
 }
 
 const RESET = '\x1b[0m';
@@ -259,6 +373,7 @@ export function renderTable(specs: SpecResult[], opts: RenderOptions): string {
         (opts.requireSentinel ? '' : ' (not enforced)'),
     );
   }
+  if (s.ratchetedTests > 0) counts.push(`${s.ratchetedTests} ratcheted (allowed unmarked)`);
   if (s.acknowledgedSkips > 0) counts.push(`${s.acknowledgedSkips} acknowledged`);
   if (s.expiredSkips > 0) counts.push(`${s.expiredSkips} expired-skip`);
   lines.push(counts.join(', '));

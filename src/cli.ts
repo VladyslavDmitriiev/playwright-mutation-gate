@@ -3,7 +3,16 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { Command, CommanderError } from 'commander';
 
-import { jsonReport, renderTable, summarize } from './report.js';
+import {
+  applyRatchet,
+  DEFAULT_RATCHET_FILE,
+  loadRatchet,
+  RatchetError,
+  staleRatchetEntries,
+  updateRatchet,
+  writeRatchet,
+} from './ratchet.js';
+import { githubAnnotations, jsonReport, renderTable, summarize } from './report.js';
 import { runSpec, type SpecResult } from './run.js';
 
 // Exit codes: 0 = gate passed, 1 = gate failed (survived / unverified /
@@ -19,6 +28,9 @@ interface CliOptions {
   behavior: boolean;
   playwrightArgs?: string;
   testId: string[];
+  ratchet?: string | true;
+  updateRatchet: boolean;
+  annotations: boolean;
 }
 
 const program = new Command()
@@ -51,6 +63,23 @@ const program = new Command()
     (value: string, acc: string[]) => acc.concat(value),
     [],
   )
+  .option(
+    '--ratchet [path]',
+    `allow the unmarked tests listed in a ratchet file (default ${DEFAULT_RATCHET_FILE});\n` +
+      'any other unmarked test still fails the gate. For adopting the gate on an existing suite',
+  )
+  .option(
+    '--update-ratchet',
+    'rewrite the ratchet file after the run: drop entries that are marked or gone, never add;\n' +
+      'creates the file from the current unmarked tests if it does not exist. Run it on purpose,\n' +
+      'not automatically in CI',
+    false,
+  )
+  .option(
+    '--annotations',
+    'also print GitHub Actions ::error annotations, one per gate failure (not with --json)',
+    false,
+  )
   .showHelpAfterError()
   .addHelpText(
     'after',
@@ -71,8 +100,19 @@ const program = new Command()
       process.exit(2);
     }
 
+    if (opts.annotations && opts.json) {
+      console.error('--annotations cannot be combined with --json (both write to stdout)');
+      process.exit(2);
+    }
+    const ratchetPath =
+      typeof opts.ratchet === 'string' ? opts.ratchet : opts.ratchet || opts.updateRatchet ? DEFAULT_RATCHET_FILE : null;
+    if (ratchetPath !== null && !opts.updateRatchet && !existsSync(ratchetPath)) {
+      console.error(`ratchet file not found: ${ratchetPath} (create it with --update-ratchet)`);
+      process.exit(2);
+    }
+
     const playwrightArgs = (opts.playwrightArgs ?? '').split(/\s+/).filter(Boolean);
-    const results: SpecResult[] = [];
+    let results: SpecResult[] = [];
     for (const spec of specPaths) {
       process.stderr.write(`gating ${spec}\n`);
       try {
@@ -83,12 +123,41 @@ const program = new Command()
       }
     }
 
+    if (ratchetPath !== null) {
+      try {
+        if (opts.updateRatchet) {
+          const upd = updateRatchet(results, ratchetPath);
+          writeRatchet(ratchetPath, upd.ratchet);
+          process.stderr.write(
+            upd.created
+              ? `created ${ratchetPath} with ${upd.ratchet.unmarked.length} allowed unmarked tests\n`
+              : `updated ${ratchetPath}: removed ${upd.removed.length}, ${upd.ratchet.unmarked.length} left\n`,
+          );
+        }
+        const ratchet = loadRatchet(ratchetPath);
+        const stale = opts.updateRatchet ? [] : staleRatchetEntries(results, ratchet, ratchetPath);
+        if (stale.length > 0) {
+          process.stderr.write(
+            `${stale.length} ratchet entries are marked or gone now; shrink the file with --update-ratchet\n`,
+          );
+        }
+        results = applyRatchet(results, ratchet, ratchetPath);
+      } catch (err) {
+        if (!(err instanceof RatchetError)) throw err;
+        console.error(err.message);
+        process.exit(2);
+      }
+    }
+
     const gate = { requireSentinel: opts.requireSentinel };
     if (opts.json) {
       console.log(jsonReport(results, gate));
     } else {
       const color = process.stdout.isTTY === true && process.env.NO_COLOR === undefined;
       console.log(renderTable(results, { color, ...gate }));
+      if (opts.annotations) {
+        for (const line of githubAnnotations(results, gate)) console.log(line);
+      }
     }
     process.exit(summarize(results, gate).gatePassed ? 0 : 1);
   });

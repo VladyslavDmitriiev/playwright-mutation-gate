@@ -64,6 +64,8 @@ export interface SpecResult {
   specPath: string;
   results: MutationResult[];
   unmarkedTests: SpecPlan['unmarkedTests'];
+  /** Unmarked tests allowed by a ratchet file (see ratchet.ts); never fail the gate. */
+  ratchetedTests?: SpecPlan['unmarkedTests'];
   strayMarkerLines: number[];
   malformedMarkerLines: number[];
   malformedGateSkipLines: number[];

@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
@@ -87,5 +87,35 @@ describe('cli surface', () => {
   it('never colors piped output', () => {
     const r = cli(unmarkedSpec);
     expect(r.stdout).not.toContain('\x1b[');
+  });
+  it('--ratchet: create, allow listed unmarked tests, refuse a missing file', () => {
+    const ratchet = join(dir, 'pmg-ratchet.json');
+    const missing = cli('--ratchet', join(dir, 'none.json'), unmarkedSpec);
+    expect(missing.status).toBe(2);
+    expect(missing.stderr).toContain('--update-ratchet');
+
+    const created = cli('--update-ratchet', '--ratchet', ratchet, unmarkedSpec);
+    expect(created.stderr).toContain('created');
+    expect(created.status).toBe(0);
+    expect(JSON.parse(readFileSync(ratchet, 'utf8'))).toEqual({
+      version: 1,
+      unmarked: [{ file: 'unmarked.spec.ts', title: 'has no marker' }],
+    });
+
+    const allowed = cli('--ratchet', ratchet, unmarkedSpec);
+    expect(allowed.status).toBe(0);
+    expect(allowed.stdout).toContain('1 ratcheted');
+  });
+
+  it('--annotations prints ::error lines; refused together with --json', () => {
+    const r = cli('--annotations', unmarkedSpec);
+    expect(r.status).toBe(1);
+    expect(r.stdout).toMatch(/::error file=.*unmarked\.spec\.ts,line=3,title=mutation gate::unmarked test/);
+    expect(cli('--annotations', '--json', unmarkedSpec).status).toBe(2);
+  });
+
+  it('--json carries the flat mutations list', () => {
+    const parsed = JSON.parse(cli('--json', unmarkedSpec).stdout) as { mutations: unknown[] };
+    expect(parsed.mutations).toEqual([]);
   });
 });

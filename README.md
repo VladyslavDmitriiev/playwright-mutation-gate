@@ -98,7 +98,36 @@ a newly added test without `// @primary-assert` shows up as:
   unmarked       adds item to cart  :42
 ```
 
-Pass `--no-require-sentinel` to opt out while you're marking an existing suite.
+Pass `--no-require-sentinel` to opt out while you're marking an existing suite,
+or better, use a [ratchet file](#adopting-on-an-existing-suite-ratchet) so new
+unmarked tests still fail.
+
+## Adopting on an existing suite (ratchet)
+
+On a suite with hundreds of unmarked tests, sentinel mode fails every run and
+`--no-require-sentinel` lets new unmarked tests slip in too. A ratchet file
+sits between the two: it lists the unmarked tests allowed for now, and the list
+can only shrink.
+
+```bash
+# once, on purpose: record today's unmarked tests
+npx playwright-mutation-gate "tests/**/*.spec.ts" --update-ratchet
+git add pmg-ratchet.json
+
+# in CI: listed tests are allowed, any NEW unmarked test fails the gate
+npx playwright-mutation-gate "tests/**/*.spec.ts" --ratchet
+```
+
+- `--ratchet [path]` reads the file (default `pmg-ratchet.json`). Listed
+  unmarked tests are reported as `ratcheted` and do not fail the gate. A missing
+  file is a usage error (exit 2).
+- `--update-ratchet` rewrites the file after the run. It drops entries whose
+  test is marked now or gone and never adds new ones, except when it creates
+  the file. Entries for specs not gated in this run are left alone. Run it by
+  hand when you have marked tests, not automatically in CI.
+- When listed tests have been marked but the file was not updated, the gate
+  says so on stderr; it does not fail.
+- Entries are `{ "file": <spec path relative to the ratchet file>, "title": <test title> }`.
 
 ## Custom test fixtures
 
@@ -179,6 +208,20 @@ jobs:
 
 The gate exits 0 only when every marked assertion is killed and sentinel
 mode is satisfied. Any other outcome exits 1.
+
+Add `--annotations` to print one GitHub Actions `::error` line per gate
+failure, so the PR shows the failing assertion inline instead of only a red
+job:
+
+```
+::error file=tests/cart.spec.ts,line=42,title=mutation gate::survived: the test stayed green with this assertion inverted, so the assertion is hollow
+```
+
+`--annotations` prints after the table and cannot be combined with `--json`.
+For agents and scripts, `--json` carries a flat `mutations` array with one
+stable record per mutation: `{ mode, verdict, spec, testTitle, testLine,
+assertLine, reason }` (`mode` is `invert` or `behavior`, `reason` is `null`
+when there is none).
 
 Cost scales linearly: every marked assertion is one extra `playwright test`
 run. That is fine for a handful of specs, but on a large suite you probably
@@ -338,6 +381,10 @@ Options:
                             and expect red (weak assertions fail the gate)
   --playwright-args <args>  extra arguments for playwright test
   --test-id <name>          treat <name> as a test builder (repeatable)
+  --ratchet [path]          allow the unmarked tests listed in a ratchet file
+                            (default pmg-ratchet.json)
+  --update-ratchet          shrink (or create) the ratchet file after the run
+  --annotations             also print GitHub Actions ::error annotations
   -V, --version             output the version number
   -h, --help                display help for command
 ```
@@ -371,7 +418,10 @@ markers). `summarize(specs, opts)` folds one or more results into a `Summary`
 with the `gatePassed` verdict. `jsonReport` and `renderTable` produce the CLI's
 two output formats. Pass `{ behavior: true }` to also run the behavior pass;
 the result then carries a `behavior` array of `BehaviorResult`s (`killed` /
-`weak` / `cannot-locate` / `error`). Advanced: `planSpecMutations`,
+`weak` / `cannot-locate` / `error`). `mutationRecords`, `gateFailures` and
+`githubAnnotations` give the flat record list, the list of gate failures and
+the `::error` lines; `loadRatchet`, `applyRatchet` and `updateRatchet` the
+ratchet. Advanced: `planSpecMutations`,
 `planBehaviorMutations`, `invertAssertLine` and `extractAssertValue` expose the
 planners, the single-line inverter and the value extractor directly. Full types
 ship with the package.
