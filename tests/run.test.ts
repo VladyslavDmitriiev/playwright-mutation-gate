@@ -5,7 +5,14 @@ import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 
 import { planSpecMutations, type Mutation } from '../src/mutate.js';
-import { runMutation, runSpec, sweepStaleMutationFiles, verdictFromReport } from '../src/run.js';
+import {
+  assertSpan,
+  baselineFromReport,
+  runMutation,
+  runSpec,
+  sweepStaleMutationFiles,
+  verdictFromReport,
+} from '../src/run.js';
 
 type OkMutation = Extract<Mutation, { mutatedSource: string }>;
 
@@ -46,14 +53,51 @@ function fakePlaywright(dir: string, body: string): string[] {
 const report = (expected: number, unexpected: number, flaky = 0, skipped = 0): string =>
   JSON.stringify({ stats: { expected, unexpected, flaky, skipped }, errors: [] });
 
-const WRITES_KILLED_REPORT = `
-require('node:fs').writeFileSync(process.env.PLAYWRIGHT_JSON_OUTPUT_NAME, ${JSON.stringify(report(0, 1))});
-process.exit(1);
+/**
+ * A fake `playwright test` that writes a realistic JSON report. Targets are the
+ * `file:line` args; a target containing `.pmg-mutation-` is a mutation run,
+ * anything else the baseline run. `mutation` decides the mutated outcome:
+ * killed fails on the inverted (`.not.`) line of the copy, elsewhere fails on
+ * line 1, survived stays green. `baseline` decides the unmutated outcome.
+ */
+function fakeReport(
+  mutation: 'killed' | 'killed-elsewhere' | 'survived' | 'flaky',
+  baseline: 'passed' | 'failed' | 'flaky' = 'passed',
+): string {
+  return `
+const fs = require('node:fs');
+const path = require('node:path');
+const targets = process.argv.slice(2).filter((a) => /:\\d+$/.test(a));
+const isMutation = targets.some((t) => t.includes('.pmg-mutation-'));
+const outcome = isMutation ? ${JSON.stringify(mutation)} : ${JSON.stringify(baseline)};
+const specs = targets.map((t) => {
+  const m = /^(.*):(\\d+)$/.exec(t);
+  const file = path.resolve(m[1]);
+  const line = Number(m[2]);
+  let failLine = 1;
+  if (outcome === 'killed') {
+    const idx = fs.readFileSync(file, 'utf8').split('\\n').findIndex((l) => l.includes('.not.'));
+    failLine = idx + 1;
+  }
+  const fail = { status: 'failed', error: { message: 'Error: boom', location: { file, line: failLine } } };
+  const pass = { status: 'passed' };
+  const status = { killed: 'unexpected', 'killed-elsewhere': 'unexpected', failed: 'unexpected',
+    flaky: 'flaky', survived: 'expected', passed: 'expected' }[outcome];
+  const results = status === 'unexpected' ? [fail] : status === 'flaky' ? [fail, pass] : [pass];
+  return { line, tests: [{ status, results }] };
+});
+const count = (s) => specs.filter((x) => x.tests[0].status === s).length;
+const report = {
+  stats: { expected: count('expected'), unexpected: count('unexpected'), flaky: count('flaky'), skipped: 0 },
+  errors: [],
+  suites: [{ specs }],
+};
+fs.writeFileSync(process.env.PLAYWRIGHT_JSON_OUTPUT_NAME, JSON.stringify(report));
+process.exit(count('unexpected') > 0 ? 1 : 0);
 `;
-const WRITES_SURVIVED_REPORT = `
-require('node:fs').writeFileSync(process.env.PLAYWRIGHT_JSON_OUTPUT_NAME, ${JSON.stringify(report(1, 0))});
-process.exit(0);
-`;
+}
+const WRITES_KILLED_REPORT = fakeReport('killed');
+const WRITES_SURVIVED_REPORT = fakeReport('survived');
 const CRASHES_WITHOUT_REPORT = `
 console.error('Error: browserType.launch: something exploded');
 process.exit(1);
@@ -69,8 +113,77 @@ describe('verdictFromReport', () => {
     expect(verdictFromReport(report(2, 1))).toEqual({ verdict: 'killed' });
   });
 
-  it('treats flaky as killed: the assertion failed at least once', () => {
-    expect(verdictFromReport(report(0, 0, 1))).toEqual({ verdict: 'killed' });
+  it('reports flaky, not killed, when the mutated run failed and then passed on retry', () => {
+    const v = verdictFromReport(report(0, 0, 1));
+    expect(v).toMatchObject({ verdict: 'flaky' });
+    expect((v as { reason: string }).reason).toContain('passed on retry');
+  });
+
+  const target = {
+    copyFile: '/x/a.pmg-mutation-0-abc.spec.ts',
+    originalFile: 'a.spec.ts',
+    assertLine: 10,
+    assertEndLine: 12,
+    matcher: 'toBeVisible',
+  };
+  const failedAt = (file: string | null, line: number | null, message = 'Error: boom'): string =>
+    JSON.stringify({
+      stats: { expected: 0, unexpected: 1, flaky: 0, skipped: 0 },
+      errors: [],
+      suites: [
+        {
+          suites: [
+            {
+              specs: [
+                {
+                  line: 3,
+                  tests: [
+                    {
+                      status: 'unexpected',
+                      results: [
+                        {
+                          status: 'failed',
+                          error: { message, ...(file !== null ? { location: { file, line } } : {}) },
+                        },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+
+  it('is killed when the failure points into the inverted statement', () => {
+    expect(verdictFromReport(failedAt(target.copyFile, 10), target)).toEqual({ verdict: 'killed' });
+    expect(verdictFromReport(failedAt(target.copyFile, 12), target)).toEqual({ verdict: 'killed' });
+  });
+
+  it('is killed-elsewhere when the failure is on another line or file', () => {
+    const v = verdictFromReport(failedAt(target.copyFile, 4, 'Error: page.goto: net::ERR_CONNECTION_REFUSED'), target);
+    expect(v).toMatchObject({ verdict: 'killed-elsewhere' });
+    const reason = (v as { reason: string }).reason;
+    expect(reason).toContain('a.spec.ts:4');
+    expect(reason).toContain('ERR_CONNECTION_REFUSED');
+    expect(reason).toContain('line 10');
+    expect(verdictFromReport(failedAt('/x/helpers.ts', 10), target)).toMatchObject({ verdict: 'killed-elsewhere' });
+  });
+
+  it('without a location, is killed only when the error comes from the inverted matcher', () => {
+    expect(
+      verdictFromReport(failedAt(null, null, 'Error: expect(locator).not.toBeVisible() failed'), target),
+    ).toEqual({ verdict: 'killed' });
+    expect(verdictFromReport(failedAt(null, null, 'Test timeout of 30000ms exceeded.'), target)).toMatchObject({
+      verdict: 'killed-elsewhere',
+    });
+  });
+
+  it('strips ANSI color codes from quoted error messages', () => {
+    const esc = String.fromCharCode(27);
+    const v = verdictFromReport(failedAt('/x/other.ts', 1, `Error: ${esc}[2mexpect(${esc}[22mx) failed`), target);
+    expect((v as { reason: string }).reason).toContain('Error: expect(x) failed');
   });
 
   it('reads survived from an all-green run', () => {
@@ -104,6 +217,50 @@ describe('verdictFromReport', () => {
     expect(verdictFromReport(JSON.stringify({ stats: { expected: 'x' } }))).toMatchObject({
       verdict: 'error',
     });
+  });
+});
+
+describe('assertSpan', () => {
+  it('spans a multi-line statement to where its parentheses balance and names the matcher', () => {
+    const src = ['a', '  await expect(', "    page.locator('#x'),", '  ).not.toBeVisible();', 'b'].join('\n');
+    expect(assertSpan(src, 2)).toEqual({ endLine: 4, matcher: 'toBeVisible' });
+    expect(assertSpan("await expect(x).not.toHaveText('a');", 1)).toEqual({ endLine: 1, matcher: 'toHaveText' });
+  });
+});
+
+describe('baselineFromReport', () => {
+  const spec = (line: number, status: string, results: unknown[] = []): unknown => ({
+    line,
+    tests: [{ status, results }],
+  });
+  const raw = (specs: unknown[]): string =>
+    JSON.stringify({ stats: { expected: 0, unexpected: 0, flaky: 0, skipped: 0 }, suites: [{ specs }] });
+
+  it('classifies each requested test line', () => {
+    const out = baselineFromReport(
+      raw([
+        spec(2, 'expected'),
+        spec(6, 'unexpected', [
+          { status: 'failed', error: { message: 'Error: boom\nmore', location: { file: '/d/s.spec.ts', line: 7 } } },
+        ]),
+        spec(10, 'flaky'),
+        spec(14, 'skipped'),
+      ]),
+      [2, 6, 10, 14, 18],
+      '/d/s.spec.ts',
+    );
+    expect(out.get(2)).toEqual({ status: 'passed' });
+    expect(out.get(6)).toMatchObject({ status: 'baseline-failed' });
+    expect((out.get(6) as { reason: string }).reason).toContain('s.spec.ts:7: Error: boom');
+    expect(out.get(10)).toMatchObject({ status: 'flaky' });
+    expect(out.get(14)).toMatchObject({ status: 'skipped' });
+    expect(out.get(18)).toMatchObject({ status: 'error' });
+  });
+
+  it('fails every line as an error on a broken report', () => {
+    const out = baselineFromReport('nope', [2, 6], 's.spec.ts');
+    expect(out.get(2)).toMatchObject({ status: 'error' });
+    expect(out.get(6)).toMatchObject({ status: 'error' });
   });
 });
 
@@ -246,6 +403,36 @@ describe('runSpec', () => {
     ]);
     expect(result.unmarkedTests).toEqual([{ title: 'no marker', line: 10 }]);
     expect(mutationFilesIn(dir)).toEqual([]);
+  });
+
+  it('does not mutate a test that is red or flaky without mutation', async () => {
+    for (const [baseline, verdict] of [
+      ['failed', 'baseline-failed'],
+      ['flaky', 'flaky'],
+    ] as const) {
+      const dir = tempDir();
+      const specPath = join(dir, 'base.spec.ts');
+      writeFileSync(specPath, MARKED_SPEC);
+      const result = await runSpec(specPath, {
+        cwd: dir,
+        playwrightCommand: fakePlaywright(dir, fakeReport('killed', baseline)),
+      });
+      expect(result.results).toHaveLength(1);
+      expect(result.results[0]).toMatchObject({ verdict, testLine: 2, assertLine: 4 });
+      expect(mutationFilesIn(dir)).toEqual([]);
+    }
+  });
+
+  it('reports killed-elsewhere when the mutant fails off the inverted line', async () => {
+    const dir = tempDir();
+    const specPath = join(dir, 'else.spec.ts');
+    writeFileSync(specPath, MARKED_SPEC);
+    const result = await runSpec(specPath, {
+      cwd: dir,
+      playwrightCommand: fakePlaywright(dir, fakeReport('killed-elsewhere')),
+    });
+    expect(result.results[0]).toMatchObject({ verdict: 'killed-elsewhere' });
+    expect(result.results[0]!.reason).toContain('else.spec.ts:1');
   });
 
   it('sweeps stale copies from dead runs before mutating', async () => {

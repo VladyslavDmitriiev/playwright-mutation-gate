@@ -20,6 +20,15 @@ export interface Summary {
   survived: number;
   cannotMutate: number;
   errors: number;
+  /**
+   * Added in 0.4.0, each fails the gate. `baselineFailed`: the test is red
+   * without any mutation. `flaky`: the unmutated or the mutated run failed and
+   * then passed on retry. `killedElsewhere`: the mutated test went red, but not
+   * on the inverted assertion.
+   */
+  baselineFailed: number;
+  flaky: number;
+  killedElsewhere: number;
   unmarkedTests: number;
   strayMarkers: number;
   malformedMarkers: number;
@@ -50,7 +59,8 @@ export interface Summary {
   behaviorErrors: number;
   /**
    * Green means proven: every marked assertion was killed under inversion and
-   * nothing was left unverified. Any survived, cannot-mutate or error verdict
+   * nothing was left unverified. Any survived, cannot-mutate, error,
+   * baseline-failed, flaky or killed-elsewhere verdict
    * fails the gate, as do marker mistakes (stray or malformed markers) and,
    * under require-sentinel, tests with no marker at all. When the behavior pass
    * ran, any weak or behavior-error verdict also fails the gate.
@@ -64,6 +74,9 @@ export function summarize(specs: SpecResult[], opts: GateOptions): Summary {
     survived: 0,
     cannotMutate: 0,
     errors: 0,
+    baselineFailed: 0,
+    flaky: 0,
+    killedElsewhere: 0,
     unmarkedTests: 0,
     strayMarkers: 0,
     malformedMarkers: 0,
@@ -82,6 +95,9 @@ export function summarize(specs: SpecResult[], opts: GateOptions): Summary {
     for (const m of spec.results) {
       if (m.verdict === 'killed') s.killed++;
       else if (m.verdict === 'survived') s.survived++;
+      else if (m.verdict === 'baseline-failed') s.baselineFailed++;
+      else if (m.verdict === 'flaky') s.flaky++;
+      else if (m.verdict === 'killed-elsewhere') s.killedElsewhere++;
       else if (m.verdict === 'cannot-mutate') {
         // A cannot-mutate covered by a valid @gate-skip is accepted until it
         // expires; expired ones fail closed again. Uncovered ones fail as before.
@@ -108,6 +124,9 @@ export function summarize(specs: SpecResult[], opts: GateOptions): Summary {
     s.survived === 0 &&
     s.cannotMutate === 0 &&
     s.errors === 0 &&
+    s.baselineFailed === 0 &&
+    s.flaky === 0 &&
+    s.killedElsewhere === 0 &&
     s.strayMarkers === 0 &&
     s.malformedMarkers === 0 &&
     s.expiredSkips === 0 &&
@@ -135,6 +154,9 @@ const VERDICT_COLOR: Record<Verdict, string> = {
   survived: '\x1b[31m',
   'cannot-mutate': '\x1b[33m',
   error: '\x1b[33m',
+  'baseline-failed': '\x1b[31m',
+  flaky: '\x1b[33m',
+  'killed-elsewhere': '\x1b[31m',
 };
 
 const TITLE_WIDTH = 48;
@@ -155,7 +177,7 @@ export function renderTable(specs: SpecResult[], opts: RenderOptions): string {
   const paint = (color: string, text: string): string =>
     opts.color ? color + text + RESET : text;
 
-  const labelWidth = 'cannot-mutate'.length;
+  const labelWidth = 'killed-elsewhere'.length;
   const titleWidth = Math.min(
     TITLE_WIDTH,
     Math.max(
@@ -228,6 +250,9 @@ export function renderTable(specs: SpecResult[], opts: RenderOptions): string {
     `${s.cannotMutate} cannot-mutate`,
     `${s.errors} errors`,
   ];
+  if (s.baselineFailed > 0) counts.push(`${s.baselineFailed} baseline-failed`);
+  if (s.flaky > 0) counts.push(`${s.flaky} flaky`);
+  if (s.killedElsewhere > 0) counts.push(`${s.killedElsewhere} killed-elsewhere`);
   if (s.unmarkedTests > 0) {
     counts.push(
       `${s.unmarkedTests} unmarked ${s.unmarkedTests === 1 ? 'test' : 'tests'}` +

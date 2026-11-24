@@ -29,6 +29,40 @@ describe('mutation gate against the fixture site', () => {
     expect(result.unmarkedTests).toEqual([]);
     expect(leftoverCopies()).toEqual([]);
   });
+
+  it('acknowledges the gate-skipped spec without running anything', async () => {
+    const result = await runSpec(join(fixturesDir, 'acknowledged-skip.spec.ts'), { cwd: root });
+    expect(result.results).toHaveLength(1);
+    expect(result.results[0]).toMatchObject({ verdict: 'cannot-mutate', gateSkip: expect.any(Object) });
+  });
+});
+
+// Red-by-design fixtures: load only with PMG_GATE_FIXTURES (playwright.config.ts).
+// The child Playwright process inherits process.env.
+describe('baseline run against the fixture site', () => {
+  const withGateFixtures = async <T>(fn: () => Promise<T>): Promise<T> => {
+    process.env.PMG_GATE_FIXTURES = '1';
+    try {
+      return await fn();
+    } finally {
+      delete process.env.PMG_GATE_FIXTURES;
+    }
+  };
+
+  it('reports baseline-failed, not killed, when the test is red before its assertion', async () => {
+    const result = await withGateFixtures(() => runSpec(join(fixturesDir, 'broken-setup.spec.ts'), { cwd: root }));
+    expect(result.results).toHaveLength(1);
+    expect(result.results[0]).toMatchObject({ verdict: 'baseline-failed' });
+    expect(result.results[0]!.reason).toContain('broken-setup.spec.ts:9');
+    expect(leftoverCopies()).toEqual([]);
+  });
+
+  it('reports flaky, not killed, when the test fails and then passes on retry', async () => {
+    const result = await withGateFixtures(() => runSpec(join(fixturesDir, 'flaky-assert.spec.ts'), { cwd: root }));
+    expect(result.results).toHaveLength(1);
+    expect(result.results[0]).toMatchObject({ verdict: 'flaky' });
+    expect(leftoverCopies()).toEqual([]);
+  });
 });
 
 describe('behavior mutation against the fixture site', () => {
