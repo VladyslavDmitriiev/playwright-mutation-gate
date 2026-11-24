@@ -19,6 +19,7 @@ export {
   type RunOptions,
   type BehaviorResult,
   type BehaviorVerdict,
+  type BaselineOutcome,
 } from './run.js';
 
 export {

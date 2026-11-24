@@ -55,6 +55,23 @@ describe('summarize / gate verdict', () => {
     expect(s.gatePassed).toBe(false);
   });
 
+  it.each([
+    ['baseline-failed', 'baselineFailed'],
+    ['flaky', 'flaky'],
+    ['killed-elsewhere', 'killedElsewhere'],
+  ] as const)('counts %s separately and fails the gate on it', (verdict, counter) => {
+    const r = { testTitle: 't', testLine: 1, assertLine: 2, verdict, reason: 'why' };
+    const s = summarize([spec({ results: [killed, r] })], STRICT);
+    expect(s[counter]).toBe(1);
+    expect(s.killed).toBe(1);
+    expect(s.errors).toBe(0);
+    expect(s.gatePassed).toBe(false);
+    const table = renderTable([spec({ results: [r] })], { ...STRICT, color: false });
+    expect(table).toContain(verdict);
+    expect(table).toContain('why');
+    expect(table).toContain(`1 ${verdict}`);
+  });
+
   it('fails on unmarked tests only under require-sentinel', () => {
     const specs = [spec({ results: [killed], unmarkedTests: [{ title: 'bare', line: 20 }] })];
     expect(summarize(specs, STRICT).gatePassed).toBe(false);

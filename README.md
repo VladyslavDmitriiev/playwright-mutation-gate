@@ -62,14 +62,29 @@ npx playwright-mutation-gate "tests/**/*.spec.ts"
 
 ## How marking works
 
-The gate inverts the marked assertion
-(`expect(x).toBeVisible()` becomes `expect(x).not.toBeVisible()`) in a
-temporary copy of the spec and re-runs the test in isolation.
+The gate first runs each marked test unmodified (the baseline), then inverts
+the marked assertion (`expect(x).toBeVisible()` becomes
+`expect(x).not.toBeVisible()`) in a temporary copy of the spec and re-runs the
+test in isolation.
 
-- **killed** -- the test failed under inversion. The assertion is alive.
+- **killed** -- the test failed under inversion, on the inverted assertion
+  itself. The assertion is alive.
 - **survived** -- the test still passed. The assertion checks nothing useful.
 - **cannot-mutate** -- the assertion shape could not be inverted safely. The
   gate reports it instead of guessing.
+- **baseline-failed** -- the test is already red without any mutation, so a red
+  mutation run would prove nothing. Not mutated; fails the gate.
+- **flaky** -- the test failed and then passed on retry, either in the baseline
+  or under inversion. A flaky red is not proof; fails the gate.
+- **killed-elsewhere** -- the mutated test went red, but not on the inverted
+  assertion (setup, a fixture, an earlier step, a timeout). The marked
+  assertion was never shown to fail; fails the gate. The reason names where it
+  actually failed.
+- **error** -- the run itself broke (launch failure, timeout, no report).
+
+The baseline is one extra Playwright run per spec covering all its marked
+tests. It runs with `--retries=1` unless you pass your own `--retries` through
+`--`, so a test that only passes on retry is caught as flaky.
 
 One marker per `test()` block. Markers inside `test.describe` or `test.use`
 callbacks work the same way -- the gate scans each `test()` individually,
@@ -210,6 +225,9 @@ npx playwright-mutation-gate "tests/**/*.spec.ts" --behavior
 
 - **killed** -- the test failed once its named value was broken. (A red here can
   also be flow breakage rather than the assertion itself; the report says so.)
+  A run that failed and then passed on retry is reported as an `error` with a
+  `flaky:` reason, not as killed. A test whose baseline is red or flaky is not
+  mutated and is reported as an `error` naming the baseline outcome.
 - **weak** -- the test stayed green while the value it names was broken. The
   assertion does not actually depend on the behavior it claims to check. This
   fails the gate.
@@ -346,7 +364,8 @@ if (!summary.gatePassed) {
 ```
 
 `runSpec(specPath, opts?)` returns a `SpecResult` (per-assertion `verdict`:
-`killed` / `survived` / `cannot-mutate` / `error`, plus unmarked/stray/malformed
+`killed` / `survived` / `cannot-mutate` / `error` / `baseline-failed` / `flaky` /
+`killed-elsewhere`, plus unmarked/stray/malformed
 markers). `summarize(specs, opts)` folds one or more results into a `Summary`
 with the `gatePassed` verdict. `jsonReport` and `renderTable` produce the CLI's
 two output formats. Pass `{ behavior: true }` to also run the behavior pass;
@@ -355,6 +374,22 @@ the result then carries a `behavior` array of `BehaviorResult`s (`killed` /
 `planBehaviorMutations`, `invertAssertLine` and `extractAssertValue` expose the
 planners, the single-line inverter and the value extractor directly. Full types
 ship with the package.
+
+## Migrating to 0.4.0
+
+0.4.0 only adds verdicts; `killed`, `survived`, `cannot-mutate` and `error`
+keep their meaning and the exit codes are unchanged (0 gate passed, 1 gate
+failed, 2 usage or launch error). What can change in an existing pipeline:
+
+- A spec that used to pass with `killed` may now fail with `baseline-failed`,
+  `flaky` or `killed-elsewhere`. That is the point of the release: those kills
+  were never proof. Fix the test (or its environment), not the gate.
+- Each spec costs one more Playwright run (the baseline), with `--retries=1`
+  unless you pass your own `--retries` after `--`.
+- Code that switches on `verdict` or reads `Summary` should handle the three new
+  verdicts and the new `baselineFailed`, `flaky` and `killedElsewhere` counters.
+  The `--json` output gains the same fields.
+- In `--behavior` mode a flaky corrupted run is now an `error`, not `killed`.
 
 ## Limitations
 
@@ -370,13 +405,13 @@ application-code mutation testing (Stryker-style), which is a different tool.
 closes part of this gap for string-valued assertions by corrupting the named
 value in the response and expecting red.
 
-**A kill is slightly generous by construction.** `killed` means the mutated
-run failed, not that the flipped assertion is what failed. Playwright actions
-carry implicit assertions (`click()` fails on its own if the element never
-appears), and an ordinarily flaky step also counts, so a test can die before
-it ever reaches the inverted line. The asymmetry works in your favor:
-`survived` has no such excuse. A test that stays green with its own primary
-assertion inverted is hollow, full stop.
+**A kill is checked against where the test failed.** Since 0.4.0, `killed`
+requires the first failure in Playwright's report to point into the inverted
+statement. If the report carries no location, the error message must come from
+the inverted matcher. Anything else is `killed-elsewhere`. A test that is red or
+flaky before any mutation is never mutated (`baseline-failed` / `flaky`).
+`survived` has no excuse either way: a test that stays green with its own
+primary assertion inverted is hollow, full stop.
 
 String-based inversion, not AST. This keeps the tool small and dependency-free
 but means some shapes report `cannot-mutate`:
