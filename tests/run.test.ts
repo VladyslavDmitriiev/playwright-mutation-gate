@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
@@ -8,6 +8,7 @@ import { planSpecMutations, type Mutation } from '../src/mutate.js';
 import {
   assertSpan,
   baselineFromReport,
+  createLimiter,
   runMutation,
   runSpec,
   sweepStaleMutationFiles,
@@ -461,4 +462,86 @@ describe('runSpec', () => {
 
     expect(existsSync(join(dir, staleName))).toBe(false);
   });
+});
+
+describe('createLimiter', () => {
+  it('keeps at most N jobs in flight and returns each result in place', async () => {
+    const limit = createLimiter(2);
+    let active = 0;
+    let peak = 0;
+    const job = (v: number) => async (): Promise<number> => {
+      active++;
+      peak = Math.max(peak, active);
+      await new Promise((r) => setTimeout(r, 20));
+      active--;
+      return v;
+    };
+    const out = await Promise.all([1, 2, 3, 4, 5].map((v) => limit(job(v))));
+    expect(out).toEqual([1, 2, 3, 4, 5]);
+    expect(peak).toBe(2);
+  });
+
+  it('propagates a rejection and keeps draining the queue', async () => {
+    const limit = createLimiter(1);
+    const failed = limit(() => Promise.reject(new Error('boom')));
+    const after = limit(() => Promise.resolve('ok'));
+    await expect(failed).rejects.toThrow('boom');
+    await expect(after).resolves.toBe('ok');
+  });
+});
+
+describe('runSpec concurrency', () => {
+  const THREE_TESTS = [
+    "import { test, expect } from '@playwright/test';",
+    ...[1, 2, 3].flatMap((i) => [
+      `test('t${i}', async ({ page }) => {`,
+      '  // @primary-assert',
+      `  await expect(page.locator('#x${i}')).toBeVisible();`,
+      '});',
+    ]),
+  ].join('\n');
+
+  /** Wraps the killed fake: records how many fake runs overlap, peak in ./peak. */
+  const counting = (dir: string): string => `
+{
+const fs = require('node:fs');
+const path = require('node:path');
+const live = path.join(${JSON.stringify(dir)}, 'live');
+fs.mkdirSync(live, { recursive: true });
+const me = path.join(live, String(process.pid));
+fs.writeFileSync(me, '');
+const n = fs.readdirSync(live).length;
+const peakFile = path.join(${JSON.stringify(dir)}, 'peak');
+const peak = fs.existsSync(peakFile) ? Number(fs.readFileSync(peakFile, 'utf8')) : 0;
+if (n > peak) fs.writeFileSync(peakFile, String(n));
+const until = Date.now() + 400;
+while (Date.now() < until) {}
+fs.unlinkSync(me);
+}
+${fakeReport('killed')}`;
+
+  for (const [concurrency, expectParallel] of [
+    [1, false],
+    [3, true],
+  ] as const) {
+    it(`runs mutations ${expectParallel ? 'in parallel' : 'one at a time'} at concurrency ${concurrency}`, async () => {
+      const dir = tempDir();
+      const specPath = join(dir, 'three.spec.ts');
+      writeFileSync(specPath, THREE_TESTS);
+      const result = await runSpec(specPath, {
+        cwd: dir,
+        concurrency,
+        playwrightCommand: fakePlaywright(dir, counting(dir)),
+      });
+      expect(result.results.map((r) => [r.testTitle, r.verdict])).toEqual([
+        ['t1', 'killed'],
+        ['t2', 'killed'],
+        ['t3', 'killed'],
+      ]);
+      const peak = Number(readFileSync(join(dir, 'peak'), 'utf8'));
+      if (expectParallel) expect(peak).toBeGreaterThanOrEqual(2);
+      else expect(peak).toBe(1);
+      expect(mutationFilesIn(dir)).toEqual([]);
+    });
+  }
 });

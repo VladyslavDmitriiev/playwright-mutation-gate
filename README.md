@@ -224,8 +224,14 @@ assertLine, reason }` (`mode` is `invert` or `behavior`, `reason` is `null`
 when there is none).
 
 Cost scales linearly: every marked assertion is one extra `playwright test`
-run. That is fine for a handful of specs, but on a large suite you probably
-do not want the full sweep on every push. Two patterns that work well:
+run, plus one baseline run per spec. `--concurrency <n>` runs up to `n` of
+those Playwright processes at once, across all specs (on the fixture suite,
+4 cut a 34 s run to 11 s with an identical report). Each process starts
+Playwright's `webServer` on its own, so parallel runs need a server they can
+share: start it before the gate, or keep `reuseExistingServer: true` (note that
+the common `!process.env.CI` setting turns reuse off in CI). On a large suite
+you probably still do not want the full sweep on every push. Two patterns that
+work well:
 
 - **Gate only what changed.** The CLI takes plain file paths, so feed it the
   spec files the PR touched:
@@ -385,6 +391,7 @@ Options:
                             (default pmg-ratchet.json)
   --update-ratchet          shrink (or create) the ratchet file after the run
   --annotations             also print GitHub Actions ::error annotations
+  --concurrency <n>         run up to n Playwright processes at once (default 1)
   -V, --version             output the version number
   -h, --help                display help for command
 ```

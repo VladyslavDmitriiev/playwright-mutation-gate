@@ -11,6 +11,8 @@
 
 export {
   runSpec,
+  createLimiter,
+  type Limiter,
   sweepStaleMutationFiles,
   DEFAULT_TIMEOUT_MS,
   type SpecResult,

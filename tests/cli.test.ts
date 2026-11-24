@@ -114,6 +114,13 @@ describe('cli surface', () => {
     expect(cli('--annotations', '--json', unmarkedSpec).status).toBe(2);
   });
 
+  it('--concurrency accepts a positive integer only', () => {
+    expect(cli('--concurrency', '0', unmarkedSpec).status).toBe(2);
+    expect(cli('--concurrency', 'two', unmarkedSpec).status).toBe(2);
+    expect(cli('--concurrency', '4', '--no-require-sentinel', unmarkedSpec).status).toBe(0);
+    expect(cli('--help').stdout).toContain('--concurrency');
+  });
+
   it('--json carries the flat mutations list', () => {
     const parsed = JSON.parse(cli('--json', unmarkedSpec).stdout) as { mutations: unknown[] };
     expect(parsed.mutations).toEqual([]);

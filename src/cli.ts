@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { existsSync, readFileSync } from 'node:fs';
-import { Command, CommanderError } from 'commander';
+import { Command, CommanderError, InvalidArgumentError } from 'commander';
 
 import {
   applyRatchet,
@@ -13,7 +13,7 @@ import {
   writeRatchet,
 } from './ratchet.js';
 import { githubAnnotations, jsonReport, renderTable, summarize } from './report.js';
-import { runSpec, type SpecResult } from './run.js';
+import { createLimiter, runSpec, type SpecResult } from './run.js';
 
 // Exit codes: 0 = gate passed, 1 = gate failed (survived / unverified /
 // marker mistakes), 2 = usage or environment error (bad flags, missing file).
@@ -31,6 +31,7 @@ interface CliOptions {
   ratchet?: string | true;
   updateRatchet: boolean;
   annotations: boolean;
+  concurrency: number;
 }
 
 const program = new Command()
@@ -76,6 +77,18 @@ const program = new Command()
     false,
   )
   .option(
+    '--concurrency <n>',
+    'run up to <n> Playwright processes at once (baseline and mutation runs,\n' +
+      'across all specs). Your webServer must tolerate parallel runs: start it\n' +
+      'yourself or set reuseExistingServer. Default 1',
+    (value: string) => {
+      const n = Number(value);
+      if (!Number.isInteger(n) || n < 1) throw new InvalidArgumentError('must be a positive integer');
+      return n;
+    },
+    1,
+  )
+  .option(
     '--annotations',
     'also print GitHub Actions ::error annotations, one per gate failure (not with --json)',
     false,
@@ -112,15 +125,24 @@ const program = new Command()
     }
 
     const playwrightArgs = (opts.playwrightArgs ?? '').split(/\s+/).filter(Boolean);
-    let results: SpecResult[] = [];
-    for (const spec of specPaths) {
-      process.stderr.write(`gating ${spec}\n`);
-      try {
-        results.push(await runSpec(spec, { playwrightArgs, testIds: opts.testId, behavior: opts.behavior }));
-      } catch (err) {
-        console.error(`failed to gate ${spec}: ${err instanceof Error ? err.message : String(err)}`);
-        process.exit(2);
-      }
+    const limiter = createLimiter(opts.concurrency);
+    let results: SpecResult[];
+    try {
+      results = await Promise.all(
+        specPaths.map(async (spec) => {
+          process.stderr.write(`gating ${spec}\n`);
+          try {
+            return await runSpec(spec, { playwrightArgs, testIds: opts.testId, behavior: opts.behavior, limiter });
+          } catch (err) {
+            throw new Error(`failed to gate ${spec}: ${err instanceof Error ? err.message : String(err)}`, {
+              cause: err,
+            });
+          }
+        }),
+      );
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exit(2);
     }
 
     if (ratchetPath !== null) {

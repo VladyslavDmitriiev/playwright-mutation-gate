@@ -86,6 +86,40 @@ export interface RunOptions {
   testIds?: string[];
   /** When true, also run the behavior mutation pass (page.route value corruption). */
   behavior?: boolean;
+  /**
+   * Max Playwright processes at once (baseline and mutation runs). Default 1.
+   * Ignored when `limiter` is given.
+   */
+  concurrency?: number;
+  /** Shared limiter, so several runSpec calls stay under one process cap. */
+  limiter?: Limiter;
+}
+
+/** Runs async jobs with at most N in flight; results keep their own promises. */
+export type Limiter = <T>(job: () => Promise<T>) => Promise<T>;
+
+export function createLimiter(concurrency: number): Limiter {
+  const max = Math.max(1, Math.floor(concurrency));
+  let active = 0;
+  const queue: (() => void)[] = [];
+  const next = (): void => {
+    if (active >= max) return;
+    const start = queue.shift();
+    if (start !== undefined) start();
+  };
+  return <T>(job: () => Promise<T>): Promise<T> =>
+    new Promise<T>((resolve, reject) => {
+      queue.push(() => {
+        active++;
+        job()
+          .then(resolve, reject)
+          .finally(() => {
+            active--;
+            next();
+          });
+      });
+      next();
+    });
 }
 
 export const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
@@ -722,10 +756,13 @@ export function sweepStaleMutationFiles(dir: string): string[] {
  * A spec containing test.only is refused outright: .only filters out every
  * other test, so verdicts from such a run would be fiction.
  */
-export async function runSpec(specPath: string, opts: RunOptions = {}): Promise<SpecResult> {
+export async function runSpec(specPath: string, runOpts: RunOptions = {}): Promise<SpecResult> {
+  const limit = runOpts.limiter ?? createLimiter(runOpts.concurrency ?? 1);
+  const opts: RunOptions = { ...runOpts, limiter: limit };
   const source = readFileSync(specPath, 'utf8');
   const plan = planSpecMutations(source, { testIds: opts.testIds });
-  const results: MutationResult[] = [];
+  const pending: Promise<MutationResult>[] = [];
+  let behaviorPending: Promise<BehaviorResult[]> | undefined;
   let baseline = new Map<number, BaselineOutcome>();
 
   if (plan.onlyTestLines.length > 0) {
@@ -733,13 +770,15 @@ export async function runSpec(specPath: string, opts: RunOptions = {}): Promise<
       `test.only on line ${plan.onlyTestLines.join(', ')} of ${basename(specPath)} ` +
       'filters out every other test, so no mutation verdict would be honest; remove .only first';
     for (const m of plan.mutations) {
-      results.push({
-        testTitle: m.testTitle,
-        testLine: m.testLine,
-        assertLine: m.assertLine,
-        verdict: 'error',
-        reason,
-      });
+      pending.push(
+        Promise.resolve({
+          testTitle: m.testTitle,
+          testLine: m.testLine,
+          assertLine: m.assertLine,
+          verdict: 'error',
+          reason,
+        }),
+      );
     }
   } else {
     sweepStaleMutationFiles(dirname(specPath));
@@ -753,40 +792,50 @@ export async function runSpec(specPath: string, opts: RunOptions = {}): Promise<
         ...behaviorPlan.filter((m) => 'mutatedSource' in m).map((m) => m.testLine),
       ]),
     ].sort((a, b) => a - b);
-    baseline = baselineLines.length > 0 ? await runBaseline(specPath, baselineLines, opts) : new Map();
+    baseline =
+      baselineLines.length > 0 ? await limit(() => runBaseline(specPath, baselineLines, opts)) : new Map();
     for (const [index, m] of plan.mutations.entries()) {
       if ('cannotMutate' in m) {
-        results.push({
+        pending.push(Promise.resolve({
           testTitle: m.testTitle,
           testLine: m.testLine,
           assertLine: m.assertLine,
           verdict: 'cannot-mutate',
           reason: m.cannotMutate,
           ...(m.gateSkip !== undefined ? { gateSkip: m.gateSkip } : {}),
-        });
+        }));
         continue;
       }
       const base = baseline.get(m.testLine);
       if (base !== undefined && base.status !== 'passed') {
-        results.push({
+        pending.push(
+          Promise.resolve({
+            testTitle: m.testTitle,
+            testLine: m.testLine,
+            assertLine: m.assertLine,
+            verdict: base.status === 'skipped' ? 'cannot-mutate' : base.status,
+            reason: base.reason,
+          }),
+        );
+        continue;
+      }
+      pending.push(
+        limit(() => runMutation(specPath, index, m, opts)).then((run) => ({
           testTitle: m.testTitle,
           testLine: m.testLine,
           assertLine: m.assertLine,
-          verdict: base.status === 'skipped' ? 'cannot-mutate' : base.status,
-          reason: base.reason,
-        });
-        continue;
-      }
-      const run = await runMutation(specPath, index, m, opts);
-      results.push({
-        testTitle: m.testTitle,
-        testLine: m.testLine,
-        assertLine: m.assertLine,
-        verdict: run.verdict,
-        ...('reason' in run ? { reason: run.reason } : {}),
-      });
+          verdict: run.verdict,
+          ...('reason' in run ? { reason: run.reason } : {}),
+        })),
+      );
     }
   }
+  if (opts.behavior) {
+    // Behavior copies take indexes after the inversion ones, so concurrent
+    // copies of the same spec never share a file name.
+    behaviorPending = runBehaviorPass(specPath, source, plan.onlyTestLines, opts, baseline, plan.mutations.length);
+  }
+  const [results, behavior] = await Promise.all([Promise.all(pending), behaviorPending]);
 
   const result: SpecResult = {
     specPath,
@@ -797,9 +846,7 @@ export async function runSpec(specPath: string, opts: RunOptions = {}): Promise<
     malformedGateSkipLines: plan.malformedGateSkipLines,
   };
 
-  if (opts.behavior) {
-    result.behavior = await runBehaviorPass(specPath, source, plan.onlyTestLines, opts, baseline);
-  }
+  if (behavior !== undefined) result.behavior = behavior;
 
   return result;
 }
@@ -815,29 +862,35 @@ async function runBehaviorPass(
   onlyTestLines: number[],
   opts: RunOptions,
   baseline: Map<number, BaselineOutcome>,
+  indexOffset: number,
 ): Promise<BehaviorResult[]> {
   const plan = planBehaviorMutations(source, { testIds: opts.testIds });
-  const results: BehaviorResult[] = [];
+  const limit = opts.limiter ?? createLimiter(1);
+  const results: Promise<BehaviorResult>[] = [];
 
   if (onlyTestLines.length > 0) {
     const reason =
       `test.only on line ${onlyTestLines.join(', ')} of ${basename(specPath)} ` +
       'filters out every other test, so no behavior verdict would be honest; remove .only first';
     for (const m of plan) {
-      results.push({ testTitle: m.testTitle, testLine: m.testLine, assertLine: m.assertLine, verdict: 'error', reason });
+      results.push(
+        Promise.resolve({ testTitle: m.testTitle, testLine: m.testLine, assertLine: m.assertLine, verdict: 'error', reason }),
+      );
     }
-    return results;
+    return Promise.all(results);
   }
 
   for (const [index, m] of plan.entries()) {
     if ('cannotLocate' in m) {
-      results.push({
-        testTitle: m.testTitle,
-        testLine: m.testLine,
-        assertLine: m.assertLine,
-        verdict: 'cannot-locate',
-        reason: m.cannotLocate,
-      });
+      results.push(
+        Promise.resolve({
+          testTitle: m.testTitle,
+          testLine: m.testLine,
+          assertLine: m.assertLine,
+          verdict: 'cannot-locate',
+          reason: m.cannotLocate,
+        }),
+      );
       continue;
     }
     const base = baseline.get(m.testLine);
@@ -845,26 +898,29 @@ async function runBehaviorPass(
       // Same rule as inversion: a red mutation run over a test that is red or
       // flaky on its own proves nothing. Skipped maps to cannot-locate, as a
       // runtime skip already does in this pass.
-      results.push({
+      results.push(
+        Promise.resolve({
+          testTitle: m.testTitle,
+          testLine: m.testLine,
+          assertLine: m.assertLine,
+          verdict: base.status === 'skipped' ? 'cannot-locate' : 'error',
+          value: m.value,
+          reason: base.status === 'skipped' ? base.reason : `${base.status}: ${base.reason}`,
+        }),
+      );
+      continue;
+    }
+    results.push(
+      limit(() => runBehaviorMutation(specPath, indexOffset + index, m, opts)).then((run) => ({
         testTitle: m.testTitle,
         testLine: m.testLine,
         assertLine: m.assertLine,
-        verdict: base.status === 'skipped' ? 'cannot-locate' : 'error',
+        verdict: run.verdict,
         value: m.value,
-        reason: base.status === 'skipped' ? base.reason : `${base.status}: ${base.reason}`,
-      });
-      continue;
-    }
-    const run = await runBehaviorMutation(specPath, index, m, opts);
-    results.push({
-      testTitle: m.testTitle,
-      testLine: m.testLine,
-      assertLine: m.assertLine,
-      verdict: run.verdict,
-      value: m.value,
-      ...('reason' in run && run.reason !== undefined ? { reason: run.reason } : {}),
-    });
+        ...('reason' in run && run.reason !== undefined ? { reason: run.reason } : {}),
+      })),
+    );
   }
 
-  return results;
+  return Promise.all(results);
 }
